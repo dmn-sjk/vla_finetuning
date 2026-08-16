@@ -1,0 +1,43 @@
+[project]
+name = "vla-finetuning"
+version = "0.1.0"
+description = "Distributed LoRA fine-tuning of a Vision-Language-Action model for robotic manipulation"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.13",
+    # Must come from the same index as torch — a PyPI torchvision against an
+    # index torch fails at import with "operator torchvision::nms does not exist".
+    "torchvision>=0.28",
+    # lerobot's video decoder. PyPI wheels link CUDA 13, so the whole stack is
+    # pinned to cu130 below to keep torch/torchvision/torchcodec consistent.
+    "torchcodec>=0.9",
+    "numpy>=2.0",
+    # peft is not yet compatible with transformers 5.x: importing it raises
+    # "Could not import module 'BloomPreTrainedModel'". Revisit when peft catches up.
+    "transformers>=4.44,<5",
+    "accelerate>=1.0",
+    "peft>=0.13",
+    "lerobot>=0.1",
+    "wandb>=0.18",
+]
+
+[tool.uv]
+# Application, not a library: don't try to build/install the project itself.
+package = false
+
+# Pin CUDA wheels explicitly on Linux. Without this, `--torch-backend=auto`
+# resolves against the *login* node, which has no GPU driver, and silently
+# installs the CPU build. Non-Linux (e.g. a laptop) falls back to plain PyPI.
+#
+# cu130 rather than cu128: torchcodec wheels link CUDA 13, so cu128 leaves it
+# unimportable. The Athena driver (595.71.05) supports CUDA 13 and A100 (sm_80)
+# is fully supported, so the whole stack lives on cu130 and stays consistent.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
+torchcodec = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
