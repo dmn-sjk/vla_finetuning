@@ -391,6 +391,69 @@ Add `configs/` for accelerate/FSDP/DeepSpeed yaml and hyperparams; keep `slurm/`
 `.sbatch` per experiment shape. `logs/`, checkpoints, venvs, and datasets are gitignored —
 none of it belongs in a 10 GB home directory or in the published repo.
 
+## Next steps (two candidates, independent — either can be done first)
+
+Both are open as of the `LoRA-based DDP training` commit. They serve different deliverables,
+so the choice is about which gap matters more, not which is technically better.
+
+### A. Simulator rollouts, for numbers comparable to the literature
+
+**Gap it closes:** we report a flow-matching *validation loss* (0.3343 +- 0.0015). Published
+pi0 / OpenVLA / EO-1 LIBERO results are **task success rates** from closed-loop rollouts.
+These are not convertible — a lower val loss does not establish a better policy, and the
+model card cannot honestly be compared to published tables without rollouts. This is the
+single biggest credibility gap in the current results.
+
+**What it needs:**
+- `lerobot[libero]` (adds `hf-libero`; pulls the LIBERO sim + MuJoCo). Currently excluded
+  from `pyproject.toml` on purpose — re-lock and re-verify when adding.
+- Headless GL on compute nodes: expect to set `MUJOCO_GL=egl` (or `osmesa`) and confirm EGL
+  works under SLURM. This is the likely time sink, not the policy code.
+- Rollouts use `policy.select_action`, not `forward`; `PI0Config.n_action_steps` controls how
+  much of the predicted 50-step chunk is executed per inference.
+- Rollouts are sequential per episode and CPU/sim-bound, so parallelise across *episodes* by
+  rank rather than trying to batch them.
+
+**Deliverable impact:** makes the HF model card and the W&B report defensible. Do this first
+if the portfolio's ML-results story matters more than its systems story.
+
+### B. Full fine-tuning under FSDP / DeepSpeed ZeRO, for the sharding story
+
+**Gap it closes:** `PROJECT.md` asks for FSDP / DeepSpeed ZeRO, but **LoRA makes sharding
+unnecessary here** — measured 11.7 GiB peak on a 40 GB card (see above). Shipping sharding
+configs for the LoRA run would be untested decoration. Full fine-tuning is the honest way to
+make sharding load-bearing:
+
+| component (4.03B, AdamW mixed precision) | memory |
+| --- | --- |
+| bf16 weights | ~8 GiB |
+| bf16 gradients | ~8 GiB |
+| fp32 optimizer states (m, v) | ~32 GiB |
+| fp32 master weights | ~16 GiB |
+| **total before activations** | **~64 GiB** |
+
+That OOMs a 40 GB A100; ZeRO-2 across 8 GPUs lands near 8 + 7 = ~15 GiB plus activations.
+
+**What it needs:** an accelerate-launched variant of `train_pi0.py` (the current one is native
+DDP), plus `configs/` for ZeRO-2, ZeRO-3 and FSDP `SHARD_GRAD_OP`. Frame it as a **scoped
+systems experiment**: demonstrate OOM on 1 GPU, then fits under each strategy, with a measured
+memory-and-throughput table. A few hundred steps is enough — convergence is not the point.
+
+**Do NOT make this the production recipe.** Full FT of 4B params on 392 episodes invites
+catastrophic forgetting of pi0's pretraining, and it breaks deliverable #2 (a ~16 GB model
+instead of an 11 MB adapter). LoRA stays the production run.
+
+### Also outstanding, smaller
+
+- **Push `adapter_best/` to the Hub with a model card** (deliverable #2). Report val loss
+  *with* its std, and state plainly that no rollout success rate has been measured yet.
+- **More data beats more tuning on this split.** All four LIBERO suites is 1,693 episodes vs
+  392, for ~9 h of compute we demonstrably have; it is the strongest lever against the
+  overfitting documented above. Needs `MultiLeRobotDataset` from
+  `lerobot.datasets.multi_dataset`.
+- Untouched regularisation knobs if staying on `spatial`: `--weight-decay` (currently 0.0),
+  `--lr` (1e-4 vs pi0's own 2.5e-5 default), `--lora-r`. Try the first two before rank.
+
 ## Gotchas
 
 - The A100s are **40 GB**. Any config or guide written for 80 GB A100s/H100s will OOM.

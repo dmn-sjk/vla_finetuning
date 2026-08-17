@@ -155,6 +155,8 @@ Running outside SLURM, source it the same way before launching. As an alternativ
 
 ## Running
 
+### Phase 1 (synthetic model, distributed scaffolding)
+
 Smoke test — single GPU, 4 GPUs via `torchrun`, and checkpoint resume, in about two minutes:
 
 ```bash
@@ -167,6 +169,24 @@ Full run on 8 GPUs:
 sbatch slurm/train.sbatch
 ```
 
+### Phase 2 (π0 + LoRA on LIBERO)
+
+```bash
+sbatch slurm/pi0_smoke.sbatch    # 1 GPU -> resume -> 4 GPU, ~10 min
+sbatch slurm/pi0_train.sbatch    # 8 GPUs, 7 epochs, ~70 min
+sbatch slurm/pi0_scaling.sbatch  # 1/2/4 GPU throughput at fixed effective batch
+```
+
+Evaluate a saved adapter. **Always pass `--repeats`**: π0 is a flow-matching model, so
+validation loss is a stochastic estimate and a single number is misleading.
+
+```bash
+python scripts/eval_adapter.py --adapter $SCRATCH/vla_finetuning/runs/pi0_libero/adapter_best \
+  --repeats 5
+```
+
+Publish `adapter_best/`, never `adapter/` — the latter is the final epoch, which overfits.
+
 Iterating locally on one GPU, without SLURM:
 
 ```bash
@@ -176,3 +196,44 @@ $SCRATCH/vla_finetuning/venvs/vla/bin/python train.py \
 
 Startup logs the effective batch size (per-device × gradient accumulation × world size), which
 is the number that makes runs comparable across different cluster shapes.
+
+## Results so far
+
+π0 + LoRA (r=32, attention targets on the VLM backbone and action expert: 12.65M trainable,
+0.31% of 4.03B) on LIBERO-spatial, 8× A100-40GB:
+
+| metric | value |
+| --- | --- |
+| best validation loss | **0.3343 ± 0.0015** (5 seeds) |
+| throughput | 89.3 samples/s on 8 GPUs (7.0× over 1 GPU, 87% scaling efficiency) |
+| peak VRAM | 11.7 GiB per GPU |
+| wall clock | 67 min for 7 epochs |
+
+Validation loss bottoms out around epoch 5 and then rises while training loss keeps falling —
+12.65M adapter parameters exceed what 392 episodes support. The best checkpoint is measurably
+better than the last (~4σ), which is why best-tracking exists.
+
+## Next steps
+
+Two independent directions, closing different gaps. `CLAUDE.md` has the detailed engineering
+notes for each.
+
+**A — Simulator rollouts.** The number above is a *validation loss*. Published π0 / OpenVLA
+LIBERO results are **task success rates** from closed-loop rollouts, and the two are not
+convertible, so these results cannot yet be compared to the literature. Closing this needs the
+`lerobot[libero]` extra and headless MuJoCo (`MUJOCO_GL=egl`) on the compute nodes. This is the
+largest credibility gap in the current results.
+
+**B — Full fine-tuning under FSDP / DeepSpeed ZeRO.** The original brief asks for sharded
+training, but LoRA makes sharding unnecessary here — the whole thing fits in 11.7 GiB of a
+40 GB card, so sharding configs would be untested decoration. Full fine-tuning needs ~64 GiB
+before activations (optimizer state alone is 4× the weights), which genuinely requires ZeRO-2
+or FSDP. Worth doing as a *scoped systems experiment* — demonstrate OOM on one GPU, then fits
+under each strategy, with a measured memory and throughput table — but not as the production
+recipe, since full FT on 392 episodes invites catastrophic forgetting and would replace an
+11 MB adapter with a ~16 GB model.
+
+Smaller items: push `adapter_best/` to the Hub with a model card; train on all four LIBERO
+suites (1,693 episodes vs 392) as the strongest lever against the overfitting above; and the
+untouched regularisation knobs (`--weight-decay` is 0.0, `--lr` is 1e-4 against π0's own
+2.5e-5 default).
