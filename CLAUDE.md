@@ -3,20 +3,28 @@
 Distributed fine-tuning of a Vision-Language-Action (VLA) model for robotic manipulation,
 on the Athena GPU cluster (Cyfronet / PLGrid). Full spec: `md_files/PROJECT.md`.
 
-Goal: LoRA fine-tune a VLA model (OpenVLA-7B / SmolVLA) on teleoperated robot trajectory
-data (LIBERO, ALOHA, PushT), mapping multi-camera frames + language commands to continuous
-actions. Deliverables: adapters on HF Hub, a public W&B report, and the SLURM + distributed
-training code.
+Goal: LoRA fine-tune **π0** (~3B: PaliGemma backbone + flow-matching action expert) on the
+**LIBERO** manipulation benchmark, mapping multi-camera frames + language commands to
+continuous actions. Deliverables: adapters on HF Hub, a public W&B report, and the SLURM +
+distributed training code.
+
+`PROJECT.md` names OpenVLA-7B / SmolVLA; **π0 supersedes that choice** (decided with the user,
+2026-08-16). It is the architecture the field converged on and is a first-class `lerobot`
+policy, so it reuses the dataset pipeline directly. SmolVLA at 450M is too small for sharding
+to be load-bearing; OpenVLA-7B is not a `lerobot` policy and would need a separate RLDS path.
 
 ## Current state
 
-**Phase 1 is implemented and verified on the cluster.** Phase 2 (lerobot + Accelerate + PEFT,
-real VLA backbone) has not been started.
+**Phase 1 is implemented and verified on the cluster. Phase 2 is in progress** — the
+environment is repinned and verified for π0/LIBERO; the training entrypoint is not written yet.
 
 ```
 train.py              # Phase 1 loop: DDP, grad accum, bf16, checkpoint/resume, W&B
 src/dist_utils.py     # process group setup, rank gating, count-weighted reductions
-src/toy.py            # VLA-shaped synthetic data + small model (Phase 2 swaps these out)
+src/toy.py            # VLA-shaped synthetic data + small model (Phase 1 only)
+src/runtime.py        # preload_npp() — must run before any torchcodec import
+scripts/verify_env.py # checks torch/torchvision/torchcodec/lerobot/peft on a compute node
+scripts/probe_pi0.py  # one pi0+LoRA forward/backward: batch keys, VRAM, param counts
 slurm/train.sbatch    # 8-GPU production job
 slurm/smoke.sbatch    # short 1-GPU + 4-GPU + resume smoke test
 pyproject.toml        # dependency declarations + CUDA index pins
@@ -28,21 +36,118 @@ develop on 1 GPU and scale unchanged. Verified on Athena (job 2948190, on the cu
 stack): 1 GPU, 4 GPUs via torchrun, and resume-from-checkpoint on both. `effective_batch` is
 logged on startup.
 
-Phase 2 should keep `train.py`'s structure and replace `src/toy.py` with real lerobot
-datasets and the VLA backbone — the batch dict keys (`images`, `state`, `tokens`, `actions`)
-are the seam.
+`train_pi0.py` mirrors that structure with the real model: same `src/dist_utils` scaffolding,
+same sampler/no_sync/atomic-checkpoint discipline, but pi0 + LoRA and `LeRobotDataset`
+instead of `src/toy.py`.
 
-Run the smoke test after any change to the distributed path:
+Run the relevant smoke test after any change to the distributed path:
 
 ```bash
-sbatch slurm/smoke.sbatch    # 1 GPU + 4 GPU + resume, ~2 min on plgrid-gpu-a100
+sbatch slurm/smoke.sbatch      # Phase 1: 1 GPU + 4 GPU + resume, ~2 min
+sbatch slurm/pi0_smoke.sbatch  # Phase 2: same three phases with pi0
 ```
 
-**Before starting Phase 2**, one thing is still missing: **no Hugging Face token is
-configured**, so pushing adapters to the Hub (deliverable #2) will fail. See Secrets below.
+### Prerequisite: gated PaliGemma repo
 
-Model and dataset choice is still open — `PROJECT.md` lists OpenVLA-7B / SmolVLA and
-LIBERO / ALOHA / PushT. Confirm with the user before committing to one.
+The account behind `HF_TOKEN` must accept the licence for
+**<https://huggingface.co/google/paligemma-3b-pt-224>** — π0's tokenizer loads from that
+gated repo, so processor construction dies with a 403 even though the π0 weights
+(`lerobot/pi0`) are themselves ungated. **Already accepted for this project's account**;
+a new contributor has to do it again.
+
+### Validation loss is a stochastic estimate — treat small differences as noise
+
+pi0 is a **flow-matching** model: each forward samples a diffusion timestep and noise, so
+val loss varies run to run on identical weights. Measured on `adapter_best` over 5 seeds:
+**0.3343 +- 0.0015** (spread 0.0042). Consequences:
+
+- **Never report a bare val loss.** Use `scripts/eval_adapter.py --repeats 5`, which seeds
+  and reports mean/std/spread.
+- **Training-time val loss is noisier than single-process eval** and scattered +-0.007 from
+  the true value in run 2988297. Cause: all ranks share `torch.manual_seed(args.seed)` and
+  run identical op sequences, so they drew *identical* timestep sequences — correlating the
+  noise and inflating variance by ~sqrt(world_size). `evaluate()` now offsets the seed per
+  rank and restores RNG state afterwards. Re-measure before trusting fine epoch rankings.
+- **Differences below ~0.005 in a training log are not meaningful.** The overfitting trend
+  (~0.03 across 10 epochs) is far above the floor and remains solid.
+
+### Results so far (LIBERO-spatial, `--lora-target attention`, r=32)
+
+Run 2988297: 7 epochs, 8 GPUs, 67 min, 89.3 samples/s, 11.7 GiB peak. Reproduced run
+2948424's val curve epoch-for-epoch (same seed => same result).
+
+| adapter | reloaded val loss (n=5) |
+| --- | --- |
+| `adapter_best` (epoch 5) | **0.3343 +- 0.0015** |
+| `adapter` (final epoch) | 0.3398 +- 0.0013 |
+
+The ~4 sigma gap means best-checkpoint selection is doing real work — **publish
+`adapter_best/`, never `adapter/`**. The saved adapter is bit-exact against `best.pt`
+(298/298 tensors, max abs diff 0.0), so the artefact is faithful.
+
+Note **2 of 298 adapter tensors are all-zero** (untrained): the `lora_B` pair on the final
+language-model `o_proj`, the same ones DDP reports as receiving no gradient. They are inert,
+not broken.
+
+### Measured facts about pi0 + LIBERO
+
+Verified end-to-end in job 2948291 (smoke: 1 GPU → resume → 4 GPU via torchrun, all passed,
+including resume *across a world-size change*).
+
+- **Peak VRAM on one A100-40GB at per-device batch 8: 9.8 GiB with gradient checkpointing,
+  21.6 GiB without.** Checkpointing cost roughly 13% step time in that measurement.
+- **Sharding is not needed.** LoRA freezes the 4.03B base, so in bf16 the weights are ~8 GiB
+  and optimizer state is allocated only for the ~2.8M adapter params. FSDP/DeepSpeed ZeRO
+  would shard almost nothing here — they become necessary for *full* fine-tuning or a 7B+
+  backbone, not for this configuration. Don't add them without a measurement that justifies it.
+- **Scaling is near-linear** (job 2948388, effective batch held at 128, `--grad-checkpointing`,
+  workers scaled per rank). Peak VRAM stayed 11.3 GiB at every world size, as expected for
+  DDP. So multi-GPU here is a genuine wall-clock win, not idle silicon:
+
+  | GPUs | samples/s | elapsed | speedup | efficiency |
+  | --- | --- | --- | --- | --- |
+  | 1 | 12.9 | 149.4 s | 1.00x | 100% |
+  | 2 | 24.8 | 77.5 s | 1.92x | 96% |
+  | 4 | 46.8 | 41.0 s | 3.63x | 91% |
+
+- **LoRA on the VLM tower requires `find_unused_parameters=True`** (now the default in
+  `train_pi0.py`; `--no-find-unused-parameters` opts out). π0 consumes only the *prefix KV
+  cache* from PaliGemma, so the final language-model layer's `o_proj` output feeds nothing
+  and its adapter gets no gradient — exactly 2 of 298 trainable tensors. DDP then aborts
+  with `Expected to have finished reduction in the prior iteration`. This does not occur
+  with `--lora-target default`, which adapts only the action expert.
+
+  **Process lesson: changing `--lora-target` changes which parameters reach the DDP reducer,
+  so it invalidates any prior smoke test.** Job 2948411 died on 8 GPUs because the smoke run
+  had used different targets. `slurm/pi0_smoke.sbatch` now pins the same
+  `--lora-target attention` as production; keep them in sync.
+
+- **The full run is hours, not days.** ~52.5k train samples/epoch; 10 epochs on 8 GPUs is
+  roughly 2 hours at the extrapolated rate. The 2-day wall clock in `pi0_train.sbatch` is a
+  large over-request — trimming it will schedule sooner. There is ample budget to train on
+  all four LIBERO suites (1,693 episodes / 273k frames) instead of `spatial` alone; that
+  needs `MultiLeRobotDataset` from `lerobot.datasets.multi_dataset` (note: it is *not*
+  exported from `lerobot_dataset`).
+
+- π0 is **4.03B** parameters. `--lora-target` selects which modules get adapters; presets and
+  their measured cost at r=32, per-device batch 16, with gradient checkpointing:
+
+  | preset | trainable | % | peak VRAM | samples/s (1 GPU) |
+  | --- | --- | --- | --- | --- |
+  | `default` (lerobot's own: action-expert q/v only) | 2.77M | 0.069% | 11.3 GiB | 5.0 |
+  | `attention` (**production default**) | 12.65M | 0.313% | 11.6 GiB | 4.7 |
+  | `attention-mlp` | 53.35M | 1.307% | 13.2 GiB | 3.8 |
+
+  The **vision tower is excluded from every preset on purpose** — SigLIP features transfer
+  well across manipulation tasks, and adapting them on 428 episodes risks damaging the part
+  doing the most generalisation work. PEFT matches `target_modules` strings with
+  `re.fullmatch`, so a typo'd regex matches nothing and silently trains ~0 parameters;
+  `train_pi0.py` raises if fewer than 1M params end up trainable.
+- `lerobot/libero_spatial_image` is **432 episodes / 52,970 frames / 10 tasks**, and stores
+  frames as **PNG images, not video**. So torchcodec is not on this dataset's hot path, but
+  dataloading is CPU-bound PNG decode over ~106k small files on Lustre — give it workers.
+- Val must be split **by episode**, not by frame: consecutive frames are near-duplicates, so
+  a frame-level split leaks nearly the whole val set into training.
 
 ## Cluster facts (verified on Athena, 2026-08-16)
 
@@ -123,17 +228,28 @@ uv sync
 directory, which lives in the 10 GB home. Add or change a dependency with `uv add <pkg>` /
 edit `pyproject.toml` then `uv lock`; never hand-install into the venv, or the lock drifts.
 
-Installed and verified: torch 2.13.0+cu130, torchvision 0.28.0+cu130, torchcodec 0.16.0+cu130,
-transformers 4.57.6, accelerate 1.14.0, peft 0.20.0, lerobot 0.3.2, wandb 0.28.2, numpy 2.2.6.
+Installed and verified (Python 3.12.12): torch 2.11.0+cu128, torchvision 0.26.0+cu128,
+torchcodec 0.11.1+cu128, transformers 5.5.4, accelerate 1.14.0, peft 0.20.0, lerobot 0.6.1,
+scipy 1.18.0, numpy 2.2.6. Verify with `python scripts/verify_env.py` **on a compute node**.
 
-Three pins in `pyproject.toml` are load-bearing and are commented there — don't "simplify" them:
+Four pins in `pyproject.toml` are load-bearing and are commented there — don't "simplify" them:
 
-- **cu130, not cu128.** torchcodec wheels link CUDA 13; on a cu128 torch it is unimportable.
-  The Athena driver (595.71.05) supports CUDA 13 and A100 (sm_80) is fully supported.
+- **lerobot 0.6.x, not 0.4.x.** Two separate reasons, either alone sufficient:
+  (a) lerobot fetches hub datasets by *git tag matching its own `CODEBASE_VERSION`*, not from
+  `main` — 0.3.x is `v2.1` and the LIBERO ports are `v3.0`-only, so they are silently
+  unreachable; (b) 0.4.x's π0 imports `transformers.models.siglip.check`, which exists only on
+  the HF branch `fix/lerobot_openpi`. That branch was rebased onto transformers 5.x, violating
+  0.4.x's own `transformers<5` cap, so **0.4.x + π0 cannot be resolved at all**. 0.5+ uses
+  stock transformers. 0.5+ requires Python 3.12, which is why the venv is 3.12.
+- **cu128.** lerobot 0.6.1 caps `torch<2.12` and `torchcodec<0.12`; cu128 carries torch 2.11 /
+  torchvision 0.26 / torchcodec 0.11. A100 (sm_80) is fully supported on CUDA 12.8.
+  (An earlier cu130 stack existed for lerobot 0.3.2 — that is history, don't restore it.)
 - **torch, torchvision and torchcodec all come from the same index.** A PyPI torchvision
   against an index torch fails at import with `operator torchvision::nms does not exist`.
-- **`transformers<5`.** peft is not yet compatible with transformers 5.x — importing it
-  raises `Could not import module 'BloomPreTrainedModel'`.
+- **`nvidia-npp-cu12`.** torchcodec links NVIDIA NPP (`libnppicc.so.12`) for GPU colour
+  conversion; torch does not ship NPP. Without it every `libtorchcodec_core*.so` fails to
+  dlopen. `src/runtime.py:preload_npp()` loads it `RTLD_GLOBAL` — **entrypoints must call it
+  before importing lerobot or torchcodec**.
 
 Never use `--torch-backend=auto`: it resolves against the *login* node, which has no GPU
 driver, and silently installs the CPU build. The explicit index in `pyproject.toml` avoids

@@ -2,23 +2,41 @@
 name = "vla-finetuning"
 version = "0.1.0"
 description = "Distributed LoRA fine-tuning of a Vision-Language-Action model for robotic manipulation"
-requires-python = ">=3.11"
+# lerobot >=0.5 requires 3.12. Upper bound keeps resolution on interpreters with full
+# wheel coverage for this stack.
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "torch>=2.13",
+    # lerobot supplies both the pi0 policy and the LeRobotDataset loader.
+    #
+    # 0.6.x specifically. Two constraints pin this:
+    #   * lerobot fetches hub datasets by *git tag* matching its own CODEBASE_VERSION
+    #     rather than from main. 0.3.x is "v2.1" and the official LIBERO ports carry
+    #     only a "v3.0" tag, so LIBERO is silently unreachable from 0.3.x.
+    #   * 0.4.x's pi0 refuses to build against stock transformers — it imports
+    #     `transformers.models.siglip.check`, which exists only on the HF branch
+    #     `fix/lerobot_openpi`. That branch has since been rebased onto transformers 5.x,
+    #     which violates 0.4.x's own transformers<5 cap, so 0.4.x + pi0 is unsatisfiable.
+    #     0.5+ dropped the fork and runs pi0 on stock transformers.
+    #
+    # Extras: [pi] = pi0/pi05/pi0-fast deps, [peft] = LoRA, [training] = dataset stack +
+    # accelerate + wandb. Sim rollouts additionally want [libero] (adds hf-libero);
+    # left out until we actually run evaluations.
+    "lerobot[pi,peft,training]>=0.6.1,<0.7",
+    # Bounds below are lerobot 0.6.1's own, restated so the resolver picks the newest
+    # allowed version from the CUDA index rather than a stale one.
+    "torch>=2.11,<2.12",
     # Must come from the same index as torch — a PyPI torchvision against an
     # index torch fails at import with "operator torchvision::nms does not exist".
-    "torchvision>=0.28",
-    # lerobot's video decoder. PyPI wheels link CUDA 13, so the whole stack is
-    # pinned to cu130 below to keep torch/torchvision/torchcodec consistent.
-    "torchcodec>=0.9",
+    "torchvision>=0.26,<0.27",
+    # lerobot's video decoder. Needs FFmpeg shared libraries at runtime, which Athena
+    # does not provide — see README for the micromamba prefix that supplies them.
+    "torchcodec>=0.11,<0.12",
+    # torchcodec links NVIDIA NPP (libnppicc.so.12) for GPU colour conversion, but torch
+    # does not ship NPP — it has no use for it. Without this wheel every
+    # libtorchcodec_core*.so fails to dlopen and video decoding dies at the first frame.
+    # 12.3.x is the NPP series that ships with CUDA 12.8, matching the index.
+    "nvidia-npp-cu12>=12.3.3,<12.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "numpy>=2.0",
-    # peft is not yet compatible with transformers 5.x: importing it raises
-    # "Could not import module 'BloomPreTrainedModel'". Revisit when peft catches up.
-    "transformers>=4.44,<5",
-    "accelerate>=1.0",
-    "peft>=0.13",
-    "lerobot>=0.1",
-    "wandb>=0.18",
 ]
 
 [tool.uv]
@@ -29,15 +47,15 @@ package = false
 # resolves against the *login* node, which has no GPU driver, and silently
 # installs the CPU build. Non-Linux (e.g. a laptop) falls back to plain PyPI.
 #
-# cu130 rather than cu128: torchcodec wheels link CUDA 13, so cu128 leaves it
-# unimportable. The Athena driver (595.71.05) supports CUDA 13 and A100 (sm_80)
-# is fully supported, so the whole stack lives on cu130 and stays consistent.
+# cu128: lerobot 0.6.1 caps torch<2.12 and torchcodec<0.12, and cu128 carries
+# torch 2.11 / torchvision 0.26 / torchcodec 0.11 — so the whole stack stays on one
+# index and one CUDA major. A100 (sm_80) is fully supported on CUDA 12.8.
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
-torchvision = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
-torchcodec = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+torchcodec = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
