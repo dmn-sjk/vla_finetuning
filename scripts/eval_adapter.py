@@ -1,9 +1,16 @@
-"""Reload a saved LoRA adapter onto base pi0 and re-measure validation loss.
+"""Reload a saved checkpoint onto pi0 and re-measure validation loss.
 
 This is the check that the *published* artefact works, not just the in-memory model at
-the end of training: it loads `lerobot/pi0` fresh, applies the adapter directory, and
+the end of training: it loads the base weights fresh, applies the saved checkpoint, and
 evaluates on the same held-out episodes training used. If the number does not match the
-training log, the adapter is not what it claims to be.
+training log, the artefact is not what it claims to be.
+
+Two shapes of artefact, one eval path, so the numbers are comparable:
+
+    # LoRA adapter from train_pi0.py
+    python scripts/eval_adapter.py --adapter <run>/adapter_best --repeats 5
+    # full fine-tune exported by train_pi0_fsdp.py (a complete pi0 checkpoint)
+    python scripts/eval_adapter.py --policy <run>/model_best --repeats 5
 
 Deliberately imports the training module rather than reimplementing the split and the
 eval loop — a divergent copy here would compare against the wrong episodes and quietly
@@ -32,9 +39,11 @@ from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--adapter", type=Path, required=True, help="PEFT adapter directory")
+    p.add_argument("--adapter", type=Path, default=None,
+                   help="PEFT adapter directory; omit to evaluate --policy on its own")
     p.add_argument("--dataset", default="lerobot/libero_spatial_image")
-    p.add_argument("--policy", default="lerobot/pi0")
+    p.add_argument("--policy", default="lerobot/pi0",
+                   help="base weights, or a full fine-tuned checkpoint directory")
     # Must match training, or the "validation" set is a different set of episodes.
     p.add_argument("--val-episodes", type=int, default=40)
     p.add_argument("--batch-size", type=int, default=16)
@@ -61,10 +70,15 @@ def main():
           f"({len(val_ds)} val frames)")
 
     policy = make_policy(cfg, ds_meta=meta)
-    from peft import PeftModel
-    policy = PeftModel.from_pretrained(policy, str(args.adapter))
-    n_lora = sum(p_.numel() for n_, p_ in policy.named_parameters() if "lora" in n_.lower())
-    print(f"adapter {args.adapter}: {n_lora/1e6:.2f}M LoRA params applied")
+    if args.adapter is not None:
+        from peft import PeftModel
+        policy = PeftModel.from_pretrained(policy, str(args.adapter))
+        n_lora = sum(p_.numel() for n_, p_ in policy.named_parameters() if "lora" in n_.lower())
+        print(f"adapter {args.adapter}: {n_lora/1e6:.2f}M LoRA params applied")
+    else:
+        # A full fine-tune: the weights came from --policy, there is nothing to apply.
+        print(f"policy {args.policy}: "
+              f"{sum(p_.numel() for p_ in policy.parameters())/1e9:.2f}B params, no adapter")
 
     policy.to(device).eval()
     preprocessor, _ = make_pre_post_processors(
@@ -88,15 +102,22 @@ def main():
 
     losses = []
     for i in range(args.repeats):
-        torch.manual_seed(args.seed + i)
-        losses.append(T.evaluate(policy, loader, preprocessor, autocast_ctx, device))
+        # The seed must go *through* evaluate(), not just be set before it: evaluate()
+        # re-seeds internally (it offsets per rank so ranks draw independent diffusion
+        # timesteps), and its default would otherwise overwrite the seed set here — every
+        # repeat would then evaluate identically and the reported std would be a
+        # structural zero rather than a measurement. Job 2991038 reported
+        # std=0.0000 spread=0.0000 over two seeds, which is what surfaced this.
+        losses.append(
+            T.evaluate(policy, loader, preprocessor, autocast_ctx, device, seed=args.seed + i)
+        )
         print(f"  repeat {i} (seed {args.seed + i}): {losses[-1]:.4f}")
 
     mean = sum(losses) / len(losses)
     spread = (max(losses) - min(losses)) if len(losses) > 1 else 0.0
     std = (sum((x - mean) ** 2 for x in losses) / len(losses)) ** 0.5 if len(losses) > 1 else 0.0
     print(f"\nVAL_LOSS mean={mean:.4f} std={std:.4f} spread={spread:.4f} "
-          f"n={len(losses)} adapter={args.adapter}")
+          f"n={len(losses)} checkpoint={args.adapter or args.policy}")
 
 
 if __name__ == "__main__":

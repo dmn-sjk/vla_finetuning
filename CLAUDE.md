@@ -15,20 +15,33 @@ to be load-bearing; OpenVLA-7B is not a `lerobot` policy and would need a separa
 
 ## Current state
 
-**Phase 1 is implemented and verified on the cluster. Phase 2 is in progress** — the
-environment is repinned and verified for π0/LIBERO; the training entrypoint is not written yet.
+**Phase 1, Phase 2 (LoRA) and Phase 2B (full FT under FSDP) are all implemented, verified
+on the cluster and fully measured.** Outstanding work is in `TODO.md`; nothing below is
+in flight.
 
 ```
-train.py              # Phase 1 loop: DDP, grad accum, bf16, checkpoint/resume, W&B
-src/dist_utils.py     # process group setup, rank gating, count-weighted reductions
-src/toy.py            # VLA-shaped synthetic data + small model (Phase 1 only)
-src/runtime.py        # preload_npp() — must run before any torchcodec import
-scripts/verify_env.py # checks torch/torchvision/torchcodec/lerobot/peft on a compute node
-scripts/probe_pi0.py  # one pi0+LoRA forward/backward: batch keys, VRAM, param counts
-slurm/train.sbatch    # 8-GPU production job
-slurm/smoke.sbatch    # short 1-GPU + 4-GPU + resume smoke test
-pyproject.toml        # dependency declarations + CUDA index pins
-uv.lock               # exact pinned versions — commit this
+train.py               # Phase 1 loop: DDP, grad accum, bf16, checkpoint/resume, W&B
+train_pi0.py           # Phase 2 production: pi0 + LoRA, native DDP  <- the production recipe
+train_pi0_fsdp.py      # Phase 2B: pi0 full FT, accelerate + FSDP; also --finetune lora
+src/dist_utils.py      # process group setup, rank gating, count-weighted reductions
+src/toy.py             # VLA-shaped synthetic data + small model (Phase 1 only)
+src/runtime.py         # preload_npp() — must run before any torchcodec import
+scripts/verify_env.py  # checks torch/torchvision/torchcodec/lerobot/peft on a compute node
+scripts/probe_pi0.py   # one pi0+LoRA forward/backward: batch keys, VRAM, param counts
+scripts/eval_adapter.py# seeded, repeated val loss for an adapter *or* a full checkpoint
+slurm/train.sbatch     # Phase 1: 8-GPU production job
+slurm/smoke.sbatch     # Phase 1: 1-GPU + 4-GPU + resume smoke test
+slurm/pi0_train.sbatch # Phase 2: 8-GPU LoRA production job
+slurm/pi0_smoke.sbatch # Phase 2: same three phases with pi0
+slurm/pi0_fsdp_preflight.sbatch # Phase 2B: everything testable on 1 GPU (fast queue)
+slurm/pi0_fsdp_smoke.sbatch     # Phase 2B: 4-GPU FSDP, resume, cross-world-size resume
+slurm/pi0_fsdp_bench.sbatch     # Phase 2B: the sharding memory/throughput sweep
+slurm/pi0_full_train.sbatch     # Phase 2B: full-FT convergence run
+slurm/pi0_fsdp_verify_export.sbatch  # reload an exported checkpoint and re-measure it
+slurm/pi0_compare_checkpoints.sbatch # LoRA vs full FT, one script, one set of seeds
+TODO.md                # what is NOT done: blockers, publishing, evaluation gaps
+pyproject.toml         # dependency declarations + CUDA index pins
+uv.lock                # exact pinned versions — commit this
 ```
 
 `train.py` runs identically at world size 1 (`python train.py`) and under `torchrun`, so
@@ -43,9 +56,14 @@ instead of `src/toy.py`.
 Run the relevant smoke test after any change to the distributed path:
 
 ```bash
-sbatch slurm/smoke.sbatch      # Phase 1: 1 GPU + 4 GPU + resume, ~2 min
-sbatch slurm/pi0_smoke.sbatch  # Phase 2: same three phases with pi0
+sbatch slurm/smoke.sbatch           # Phase 1: 1 GPU + 4 GPU + resume, ~2 min
+sbatch slurm/pi0_smoke.sbatch       # Phase 2: same three phases with pi0
+sbatch slurm/pi0_fsdp_preflight.sbatch  # Phase 2B: 1 GPU on the fast queue, ~10 min
+sbatch slurm/pi0_fsdp_smoke.sbatch      # Phase 2B: 4-GPU FSDP + both resume paths
 ```
+
+Run the preflight first: it catches everything that does not need more than one GPU on
+`plgrid-now`, which schedules in seconds and does not bill the main allocation.
 
 ### Prerequisite: gated PaliGemma repo
 
@@ -96,10 +114,11 @@ including resume *across a world-size change*).
 
 - **Peak VRAM on one A100-40GB at per-device batch 8: 9.8 GiB with gradient checkpointing,
   21.6 GiB without.** Checkpointing cost roughly 13% step time in that measurement.
-- **Sharding is not needed.** LoRA freezes the 4.03B base, so in bf16 the weights are ~8 GiB
-  and optimizer state is allocated only for the ~2.8M adapter params. FSDP/DeepSpeed ZeRO
+- **Sharding is not needed *for LoRA*.** LoRA freezes the 4.03B base, so in bf16 the weights
+  are ~8 GiB and optimizer state is allocated only for the adapter params. FSDP/DeepSpeed ZeRO
   would shard almost nothing here — they become necessary for *full* fine-tuning or a 7B+
-  backbone, not for this configuration. Don't add them without a measurement that justifies it.
+  backbone, not for this configuration. That is what Phase 2B measures; see
+  "Full fine-tuning under FSDP" below. Keep LoRA + DDP as the production recipe.
 - **Scaling is near-linear** (job 2948388, effective batch held at 128, `--grad-checkpointing`,
   workers scaled per rank). Peak VRAM stayed 11.3 GiB at every world size, as expected for
   DDP. So multi-GPU here is a genuine wall-clock win, not idle silicon:
@@ -148,6 +167,253 @@ including resume *across a world-size change*).
   dataloading is CPU-bound PNG decode over ~106k small files on Lustre — give it workers.
 - Val must be split **by episode**, not by frame: consecutive frames are near-duplicates, so
   a frame-level split leaks nearly the whole val set into training.
+
+## Full fine-tuning under FSDP (`train_pi0_fsdp.py`)
+
+Phase 2B. This exists to make sharding *load-bearing* rather than decorative, and to answer
+the obvious objection to the LoRA run: LoRA fits in 11.7 GiB, so what is FSDP for?
+
+**It is for the configuration that does not otherwise run at all.** Measured on one
+A100-40GB, all 4.028B parameters trainable, per-device batch 8, gradient checkpointing on
+(job 2989458):
+
+```
+OOM_EXPECTED finetune=full sharding=ddp world_size=1 per_device_bs=8
+             grad_checkpointing=True peak_vram_gib=37.9 capacity_gib=39.7
+```
+
+fp32 weights (16.1 GiB) + fp32 gradients (16.1 GiB) + activations fills the card before
+AdamW ever allocates its 32 GiB of moments. Sharding those three across ranks is the whole
+point; `--sharding shard_grad_op` shards gradients and optimizer state (ZeRO-2),
+`--sharding full_shard` shards parameters as well (ZeRO-3).
+
+### Measured: what sharding actually buys (jobs 2989458, 2990654)
+
+pi0 4.028B trainable, LIBERO-spatial, per-device batch 8, gradient checkpointing on unless
+noted, `--reduce-dtype fp32`, 30 optimizer steps timed after a 5-step warmup. Throughput
+covers training steps only; peak VRAM is the training peak (jobs 2989458, 2990654, 2990653).
+
+| GPUs | strategy | result | samples/s | peak VRAM |
+| --- | --- | --- | --- | --- |
+| 1 | unsharded (DDP path) | **OOM** | — | 37.4 GiB of 39.7 before dying |
+| 2 | FULL_SHARD (ZeRO-3) | **OOM** | — | — |
+| 8 | unsharded (DDP path) | **OOM** | — | — |
+| 4 | SHARD_GRAD_OP (ZeRO-2) | runs | 17.5 / 18.6 | 25.1 GiB |
+| 4 | FULL_SHARD (ZeRO-3) | runs | 19.2 / 19.3 | 25.1 GiB |
+| 8 | SHARD_GRAD_OP (ZeRO-2) | runs | 48.4 | 17.0 GiB |
+| 8 | FULL_SHARD (ZeRO-3) | runs | **49.7** | 17.0 GiB |
+| 8 | FULL_SHARD, *no* grad ckpt | runs | 31.0 | 33.2 GiB |
+| 8 | FULL_SHARD, **LoRA** | runs | 50.9 | 11.7 GiB |
+
+(Two numbers in the 4-GPU rows are the same configuration measured in two separate jobs —
+they agree to ~5%, which is the reproducibility of these measurements.)
+
+Read this as the honest answer to "what is FSDP for here": not a speedup, but the
+difference between a configuration that does not run at all and one that does. For LoRA,
+sharding buys nothing (11.7 GiB unsharded on one card) — that is why LoRA stays on DDP.
+
+**Eight GPUs on DDP still OOMs.** DDP replicates the optimizer state on every rank, so
+adding hardware does not help at all — only sharding does. That row is the cleanest
+statement of what FSDP is buying.
+
+Results worth not glossing over:
+
+- **ZeRO-2's arithmetic predicts the measured peak exactly at both world sizes.** At world
+  size N: 16.1/N (fp32 master) + 8.1 (bf16 params, *not* sharded by ZeRO-2) + 16.1/N (grads)
+  + 32.2/N (AdamW) + ~1 (activations). That is 25.2 at N=4 (measured 25.1) and 17.1 at N=8
+  (measured 17.0). The model is right.
+- **ZeRO-3 measured identical to ZeRO-2 at both world sizes** (25.1 and 17.0), and this is
+  a real result rather than a measurement artefact. It was worth checking: pi0 is built in
+  fp32 and moved to the GPU *before* FSDP shards it, and `max_memory_allocated()` is a
+  process-lifetime high-water mark, so a large enough construction transient would floor
+  every row and hide differences beneath it. `train_pi0_fsdp.py` now resets the peak after
+  `prepare()` and reports `setup_peak_gib` separately — **measured at 15.5 GiB**. Since 15.5
+  is below the 17.0 reported at world size 8, the reported peaks are genuine training peaks
+  and the ZeRO-2/ZeRO-3 equivalence stands.
+
+  The remaining explanation is the wrap policy: 39% of the model sits in the root FSDP unit
+  — a consequence of pi0's fused layer loop preventing per-layer wrapping — and FSDP1 keeps
+  the root gathered across forward and backward, so ZeRO-3 cannot shard the part that
+  dominates. Still an inference, but now the only one standing.
+- **ZeRO-3 is marginally faster than ZeRO-2** (19.3 vs 18.6 at N=4; 49.7 vs 48.4 at N=8)
+  despite doing more communication. Small but consistent across both world sizes. There is
+  no reason to prefer ZeRO-2 here.
+- **Scaling 4 -> 8 GPUs is superlinear** (19.3 -> 49.7 samples/s, 2.6x for 2x the hardware).
+  Not magic: at 4 GPUs the 25.1 GiB working set on a 40 GiB card leaves the allocator
+  fighting FSDP's all-gather buffers, and halving per-rank state relieves it. Sharding buys
+  throughput here by buying headroom.
+- **Gradient checkpointing is a throughput *win* here, not a cost.** 8 GPUs, FULL_SHARD,
+  per-device batch 8: 49.7 samples/s at 17.0 GiB with it, **31.0 samples/s at 33.2 GiB
+  without**. That is the opposite sign to the LoRA run, where it cost ~13% step time. Same
+  cause as above — at 33.2 GiB the allocator is under enough pressure that recomputation
+  buys back more than it spends. Never carry a checkpointing cost estimate across memory
+  regimes. It also puts a number on activations: ~16 GiB at per-device batch 8.
+- **LoRA under FSDP peaks at 11.7 GiB, matching the LoRA+DDP production run exactly.** Two
+  entirely different code paths agreeing on the same number is the best evidence available
+  that both are measuring what they claim. Note its *setup* peak (15.1 GiB) exceeds its
+  training peak: for LoRA the card requirement is set by model construction, not training.
+
+**Four GPUs is the floor, not one.** Sharding across two ranks still does not fit: job
+2989671 resharded a checkpoint onto 2 ranks correctly and then OOM'd in the first step at
+35.4 GiB allocated, 2.94 GiB short of the card, at per-device batch *2*. At world size 4 the
+same configuration peaks at 25.1 GiB and trains. This is why `slurm/pi0_fsdp_smoke.sbatch`
+tests cross-world-size resume with LoRA rather than full FT — the resharding path is what
+that phase checks, and it must not double as an assertion that full FT fits on two cards.
+
+### pi0 breaks the textbook auto-wrap policy — this is the interesting part
+
+FSDP unshards parameters in a module's **pre-forward hook**, so a wrapped module only works
+if its `forward` is actually called. `PaliGemmaWithExpertModel` never calls its decoder
+layers: `compute_layer_complete` (lerobot/policies/pi0/modeling_pi0.py:78) reaches into
+`layer.self_attn.q_proj(...)` directly so the VLM prefix and the action-expert suffix can
+share one attention op. `GemmaDecoderLayer.forward` and `GemmaAttention.forward` are dead
+code in this model.
+
+Consequences, all of them load-bearing:
+
+- **`TRANSFORMER_BASED_WRAP` on `GemmaDecoderLayer` is wrong here.** It would build units
+  whose hooks never fire, leaving parameters sharded while the math runs. That is a silent
+  correctness bug, not a clean failure.
+- We wrap **`GemmaMLP` and `SiglipEncoderLayer`** instead — both are invoked as modules.
+  Measured coverage: **2.45B of 4.04B parameters (61%)**, printed as `fsdp_wrapped=` on
+  startup. The remaining 39% (embeddings, attention projections, norms) lands in the root
+  unit, which is still sharded — it just means one coarser all-gather.
+- `train_pi0_fsdp.py` **raises if coverage drops below 50%**, because a transformers upgrade
+  that renames those classes would otherwise silently collapse FULL_SHARD into SHARD_GRAD_OP
+  and quietly invalidate the memory table.
+- **DeepSpeed ZeRO-3 is unavailable for the same reason** (it gathers parameters through
+  module hooks too). ZeRO-2 would work, but FSDP's SHARD_GRAD_OP is the same algorithm
+  without the extra dependency — which is why no DeepSpeed dependency was added.
+
+### The head-to-head, measured the same way (job 2991314)
+
+Both artefacts re-evaluated with one script, one batch size, one set of seeds, on the same
+40 held-out episodes. This is the comparison to quote; the two training logs are *not*
+comparable to each other directly (different eval batch sizes, and the LoRA figure predates
+the `--repeats` fix).
+
+| checkpoint | val loss (n=3) | trainable | artefact | min GPUs |
+| --- | --- | --- | --- | --- |
+| base `lerobot/pi0` | 0.8719 +- 0.0048 | — | — | — |
+| LoRA `adapter_best` | **0.3344 +- 0.0020** | 12.65M | 49 MB | 1 |
+| full FT `model_best` | **0.3350 +- 0.0014** | 4,028M | 7.6 GB | 4 |
+
+The two fine-tunes differ by 0.0006, well inside the +-0.002 seed noise: **statistically
+indistinguishable quality.** LoRA gets there with 0.3% of the trainable parameters, a ~160x
+smaller artefact, and a quarter of the hardware. That is the whole argument for the
+production recipe, and it is now a measurement rather than a prior.
+
+### Full FT reaches LoRA's quality in one epoch, then overfits hard
+
+Job 2991036: 4 GPUs, FULL_SHARD, effective batch 256, lr 2.5e-5 cosine, the *same* 392/40
+episode split as the LoRA production run so the curves are comparable.
+
+| epoch | val loss | train loss |
+| --- | --- | --- |
+| 0 | **0.3344** (best) | ~0.35 |
+| 1 | 0.3658 | ~0.31 |
+| 2 | 0.5015 | 0.24 |
+| 3 | 0.6869 | 0.15 |
+| 4 | 0.8361 | 0.084 |
+
+Run completed in 3 h 20 m; `THROUGHPUT ... samples_per_s=21.0 ... peak_vram_gib=25.1` over
+11,386 s of timed training, which matches the 30-step benchmark row and confirms the
+measurement holds at production length.
+
+Three things follow, and they are the reason this is not the production recipe:
+
+- **Full FT peaks at epoch 0 at parity with LoRA** (0.3344 vs 0.3343 +- 0.0015). Training-time
+  val loss carries ~+-0.007 noise, so read this as "both land at ~0.33", not as an exact tie.
+  Updating 4.028B parameters buys no generalisation over updating 12.65M of them.
+- **It then degrades monotonically** while train loss keeps falling — 392 episodes cannot
+  support 4B trainable parameters. LoRA's best was epoch 5 of 7; full FT's is epoch 0 of 5.
+- **By epoch 4 it is back at base-model quality** (0.8361 vs the untrained 0.8719 +- 0.0048)
+  with train loss at 0.084. That is catastrophic forgetting measured rather than asserted:
+  the run memorised the training episodes and gave back everything the pretraining provided.
+  Anyone tempted to "just train longer" on this dataset size has the counter-example here.
+
+Cost of the two artefacts for the same result: 7.6 GB vs 49 MB, and a 4-GPU floor vs running
+on one. **LoRA + DDP stays the production recipe**, now for a measured reason rather than an
+assumed one.
+
+### Reference point: what fine-tuning is worth at all
+
+Base `lerobot/pi0`, no fine-tuning, on the **production** 40-episode val split (job 2991110,
+3 seeds, with the `--repeats` fix below):
+
+| checkpoint | val loss (40 val episodes) |
+| --- | --- |
+| base `lerobot/pi0` | **0.8719 +- 0.0048** |
+| LoRA `adapter_best` | 0.3343 +- 0.0015 |
+| full FT | measured by `slurm/pi0_full_train.sbatch` |
+
+Quote this whenever a fine-tuned number is quoted. Without it, "val loss 0.33" is
+uninterpretable — it is the drop from 0.87 that shows the training did something, and it is
+the number that makes the LoRA-vs-full-FT comparison meaningful rather than a bare pair.
+
+Note the base model's spread (0.0048) is ~3x the LoRA adapter's documented 0.0015 on the
+same split. Both are real measurements taken with different eval batch sizes, so do not
+treat 0.0015 as *the* noise floor for every checkpoint — re-measure per artefact.
+
+### The exported checkpoint is real, and verified end-to-end
+
+`train_pi0_fsdp.py` gathers the FSDP shards and writes a complete pi0 policy directory —
+`config.json`, `model.safetensors` (8.06 GB in bf16 for 4.03B params), and both processor
+configs including the normalisation statistics. Without those statistics the weights load
+and predict nonsense, which is the failure mode worth guarding against.
+
+Verified in job 2991045 by loading the exported directory fresh and re-evaluating:
+
+| | val loss (4 val episodes) |
+| --- | --- |
+| training log (smoke phase 3) | 0.6796 |
+| reloaded export, seeds 0-1 | **0.6850 +- 0.0041** |
+
+Consistent to ~1.3 sigma, so the artefact is what it claims to be. Re-check with
+`sbatch slurm/pi0_fsdp_verify_export.sbatch <dir>` after any change to the export path.
+
+**Caveat on that number:** a 4-episode val set (~490 frames) is far noisier than the
+40-episode set the LoRA results use. Seed 1234 gives 0.7116 on the same weights — 0.03
+away from the seed-0/1 mean. Judge export fidelity on the production val split with
+`--repeats 5`, not on a smoke run's.
+
+### `scripts/eval_adapter.py --repeats` was reporting a structural zero
+
+Found while verifying the export above. The script seeded with `torch.manual_seed(seed + i)`
+before calling `T.evaluate()`, but `evaluate()` **re-seeds internally** (`seed: int = 1234`,
+offset per rank) and so overwrote it. Every repeat therefore evaluated identically and
+`std`/`spread` were always exactly 0.0000 — job 2991038 reported `std=0.0000 spread=0.0000`
+over two seeds, which is what surfaced it.
+
+Fixed by passing the seed through: `T.evaluate(..., seed=args.seed + i)`. The internal
+seeding was added to `evaluate()` *after* the `0.3343 +- 0.0015` measurement was taken, so
+that historical number is still valid — but anything measured with `--repeats` between that
+change and this fix has a meaningless spread. Re-measure before quoting one.
+
+### Other things that are not obvious
+
+- **The model is built in fp32, not bf16.** FSDP1 flattens each unit into a single tensor
+  and refuses to mix dtypes inside it, and pi0's own bf16 mode is deliberately mixed (it
+  keeps the vision tower and layernorms in fp32). So `dtype="float32"` plus an FSDP
+  `MixedPrecision` policy — bf16 compute and all-gather, fp32 master weights and gradient
+  reduction. This is why a LoRA row in this script peaks at 22.7 GiB where `train_pi0.py`
+  peaks at 11.6 GiB: it is the same model in fp32.
+- **accelerate silently ignores an FSDP plugin at world size 1** — the FSDP branch in
+  `accelerate/state.py` sits inside the MULTI_GPU arm. A single-process `--sharding
+  full_shard` would train unsharded and report a number that measures nothing, so the
+  script raises instead. Verified in the preflight.
+- **No `no_sync()` on accumulation micro-batches**, unlike `train_pi0.py`. FSDP's `no_sync`
+  keeps *unsharded* gradients resident for the whole accumulation window, handing back
+  exactly the memory sharding just saved.
+- **The scheduler is not passed through `accelerate.prepare`.** An `AcceleratedScheduler`
+  steps once per process per optimizer step, which would multiply the LR schedule by
+  world_size. It is stepped by hand and registered for checkpointing instead.
+- **`save_state` serialises the whole 4.03B model even in LoRA mode** (16 GB per epoch) —
+  it is a resume point, not an artefact. `--no-checkpoint` skips it for benchmark rows.
+- Throughput is timed over **training segments only**, summed per epoch. A single
+  start-to-finish stopwatch folds each epoch's validation pass and 16 GB checkpoint write
+  into the window. Note `train_pi0.py`'s published samples/s does *not* do this, so its
+  numbers and this script's are not directly comparable.
 
 ## Cluster facts (verified on Athena, 2026-08-16)
 
@@ -391,10 +657,11 @@ Add `configs/` for accelerate/FSDP/DeepSpeed yaml and hyperparams; keep `slurm/`
 `.sbatch` per experiment shape. `logs/`, checkpoints, venvs, and datasets are gitignored —
 none of it belongs in a 10 GB home directory or in the published repo.
 
-## Next steps (two candidates, independent — either can be done first)
+## Next steps
 
-Both are open as of the `LoRA-based DDP training` commit. They serve different deliverables,
-so the choice is about which gap matters more, not which is technically better.
+**B is implemented** (see "Full fine-tuning under FSDP" above); A is still open.
+**`TODO.md` holds the full outstanding list** — blockers, publishing prerequisites,
+evaluation gaps and housekeeping — and is the file to read first when picking this back up.
 
 ### A. Simulator rollouts, for numbers comparable to the literature
 
@@ -417,31 +684,23 @@ single biggest credibility gap in the current results.
 **Deliverable impact:** makes the HF model card and the W&B report defensible. Do this first
 if the portfolio's ML-results story matters more than its systems story.
 
-### B. Full fine-tuning under FSDP / DeepSpeed ZeRO, for the sharding story
+### B. Full fine-tuning under FSDP — **done**, see the section above
 
-**Gap it closes:** `PROJECT.md` asks for FSDP / DeepSpeed ZeRO, but **LoRA makes sharding
-unnecessary here** — measured 11.7 GiB peak on a 40 GB card (see above). Shipping sharding
-configs for the LoRA run would be untested decoration. Full fine-tuning is the honest way to
-make sharding load-bearing:
+`train_pi0_fsdp.py` plus four sbatch scripts. Two notes carried forward from planning:
 
-| component (4.03B, AdamW mixed precision) | memory |
-| --- | --- |
-| bf16 weights | ~8 GiB |
-| bf16 gradients | ~8 GiB |
-| fp32 optimizer states (m, v) | ~32 GiB |
-| fp32 master weights | ~16 GiB |
-| **total before activations** | **~64 GiB** |
+**There is no `configs/` directory, deliberately.** The sharding strategy is a CLI flag
+(`--sharding`) and the FSDP plugin is built in Python, because the auto-wrap policy pi0
+requires cannot be expressed in an accelerate YAML — it is a callable that matches
+`GemmaMLP`/`SiglipEncoderLayer` rather than the decoder-layer class YAML would name. Shipping
+YAML that the code then overrides would be two sources of truth for the one setting the whole
+experiment varies, and the reader could not tell which one ran. Launch with `torchrun`, like
+everything else in the repo.
 
-That OOMs a 40 GB A100; ZeRO-2 across 8 GPUs lands near 8 + 7 = ~15 GiB plus activations.
-
-**What it needs:** an accelerate-launched variant of `train_pi0.py` (the current one is native
-DDP), plus `configs/` for ZeRO-2, ZeRO-3 and FSDP `SHARD_GRAD_OP`. Frame it as a **scoped
-systems experiment**: demonstrate OOM on 1 GPU, then fits under each strategy, with a measured
-memory-and-throughput table. A few hundred steps is enough — convergence is not the point.
-
-**Do NOT make this the production recipe.** Full FT of 4B params on 392 episodes invites
-catastrophic forgetting of pi0's pretraining, and it breaks deliverable #2 (a ~16 GB model
-instead of an 11 MB adapter). LoRA stays the production run.
+**Do NOT make full FT the production recipe.** Full FT of 4B params on 392 episodes invites
+catastrophic forgetting of pi0's pretraining, and it breaks deliverable #2 (a multi-GB model
+instead of an 11 MB adapter). LoRA + DDP (`train_pi0.py`, `slurm/pi0_train.sbatch`) stays the
+production run; `slurm/pi0_full_train.sbatch` exists so the comparison is a number rather
+than an assumption.
 
 ### Also outstanding, smaller
 
