@@ -41,6 +41,11 @@ default and are now redirected to `$SCRATCH` (see `CLAUDE.md`, "Runtime configur
 
 ## 3. Evaluation
 
+**Performance improvements have their own file: `IMPROVEMENTS.md`** — what the ~42-point gap
+to published pi0 LIBERO numbers plausibly is, what each fix costs, and in what order. Its
+first item (~30 min) decides whether the rest is worth doing at all.
+
+
 ### 3b. Success rates — **DONE** (job 3108565, 2026-08-30)
 
 500 episodes per checkpoint on the standard LIBERO protocol. base 0.0% (0/500),

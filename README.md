@@ -356,7 +356,9 @@ is why DeepSpeed ZeRO-3 cannot be used on this model at all.
 
 ## Next steps
 
-`TODO.md` is the authoritative list of what is not done. Nothing is blocked: the `$HOME`
+`TODO.md` is the authoritative list of what is not done, and **`IMPROVEMENTS.md`** covers
+the gap between our 54.2% and the ~97% published for π0 on LIBERO-spatial — causes, costs
+and ordering. Nothing is blocked: the `$HOME`
 quota is clear and Phase 2B is committed. `CLAUDE.md` has the detailed engineering notes.
 
 **A — Simulator rollouts.** *Done*, see the success rates above. `scripts/eval_libero.py`
