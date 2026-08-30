@@ -139,8 +139,29 @@ concrete ways, none of which we chose deliberately:
 | LR warmup | **8,000 steps**, cosine to 2.5e-6 | — | 50–200 steps |
 | peak LR | 2.5e-5 | — | 1e-4 (LoRA) / 2.5e-5 (full FT) |
 | EMA | not in config | **0.999** | none |
+| camera slots | 3 (2 real + 1 empty) | 3 | **2** |
 
-The two that stand out:
+### We train with 2 camera slots; the reference setups use 3
+
+Found on 2026-08-30 while preparing item 1, and **not a deliberate choice on our part**.
+
+`lerobot/pi0` declares three camera inputs (`camera0/1/2`), and openpi's LIBERO setup feeds
+three image slots — the two real LIBERO cameras plus one empty padding camera, which is why
+`lerobot/pi0_libero_finetuned_v044` carries `empty_cameras: 1` and an
+`observation.images.empty_camera_0` feature. **Our runs use `empty_cameras: 0` and two
+slots**, because `PI0Config(pretrained_path=...)` is a plain dataclass constructor that never
+reads the checkpoint's `config.json`: features get filled from the dataset and structural
+fields keep library defaults. We inherited a default rather than picking a value.
+
+π0 pads a missing image feature with -1 and a zero attention mask, so two slots *works* — but
+it changes the prefix token layout relative to how the base model was pretrained, and relative
+to both reference recipes. Whether that costs accuracy is untested.
+
+Cheap to test properly: retrain with `empty_cameras=1`. Note that evaluating our *existing*
+checkpoints with 3 slots would not test this — it would just introduce a train/test mismatch
+they don't have. Fold it into item 3's run rather than spending a separate one.
+
+The two recipe items that stand out:
 
 - **Effective batch 256 vs 32.** At the same sample budget this costs us **8× fewer optimizer
   steps**. Combined with 4.3× less data, our LoRA run took 1,314 steps against openpi's
@@ -190,7 +211,7 @@ overfitting.
 | --- | --- | --- | --- |
 | 1 | evaluate `lerobot/pi0_libero_finetuned_v044` in our harness | ~30 min | decides whether 3–6 are worth doing |
 | 2 | `n_action_steps` sweep on our checkpoint | ~40 min | free; independent of 1 |
-| 3 | LoRA on `HuggingFaceVLA/libero`, openpi sample budget, batch 64, weight decay 0.01 | ~3–5 h | needs 1's verdict |
+| 3 | LoRA on `HuggingFaceVLA/libero`, openpi sample budget, batch 64, weight decay 0.01, **`empty_cameras=1`** | ~3–5 h | needs 1's verdict |
 | 4 | re-evaluate on all four suites | ~1.5–1.8 h | after 3 |
 | 5 | add EMA (LoRA path), retrain | ~3–5 h | only if 3 helped |
 

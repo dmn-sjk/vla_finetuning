@@ -67,6 +67,16 @@ SUITE_MAX_STEPS = {
     "libero_10": 520,
     "libero_90": 400,
 }
+# Which LIBERO camera feeds which policy input. Ports disagree on the naming:
+# `lerobot/libero_spatial_image` calls the wrist camera `wrist_image`, while
+# `HuggingFaceVLA/libero` calls it `image2`. Feeding the wrong one runs silently and scores
+# ~0%, so the mapping is resolved from the loaded config rather than assumed.
+CAMERA_ALIASES = {
+    "observation.images.image": "agentview_image",
+    "observation.images.wrist_image": "robot0_eye_in_hand_image",
+    "observation.images.image2": "robot0_eye_in_hand_image",
+}
+
 NUM_STEPS_WAIT = 10  # settle steps after reset, before the policy sees anything
 DUMMY_ACTION = np.array([0, 0, 0, 0, 0, 0, -1], dtype=np.float32)
 
@@ -132,11 +142,25 @@ class Rank:
 
 
 def load_policy(args, device, stats_meta):
-    cfg = PI0Config(
-        pretrained_path=args.policy,
-        device=device.type,
-        dtype="bfloat16" if args.bf16 else "float32",
-    )
+    if args.from_pretrained_config:
+        # PI0Config(pretrained_path=...) is a plain dataclass constructor: it does NOT read
+        # the checkpoint's config.json, so input_features come out empty and get filled from
+        # --dataset, and structural fields keep library defaults (notably empty_cameras=0).
+        # That is fine for our own checkpoints, which were trained under exactly those
+        # defaults, but silently misconfigures a third-party one. from_pretrained inherits
+        # the checkpoint's real structure -- for lerobot/pi0_libero_finetuned_v044 that means
+        # cameras image/image2 plus one empty padding slot (3 image tokens, as openpi's
+        # LIBERO setup uses), rather than our 2.
+        cfg = PI0Config.from_pretrained(args.policy)
+        cfg.pretrained_path = args.policy
+        cfg.device = device.type
+        cfg.dtype = "bfloat16" if args.bf16 else "float32"
+    else:
+        cfg = PI0Config(
+            pretrained_path=args.policy,
+            device=device.type,
+            dtype="bfloat16" if args.bf16 else "float32",
+        )
     if args.n_action_steps is not None:
         cfg.n_action_steps = args.n_action_steps
     policy = make_policy(cfg, ds_meta=stats_meta)
@@ -158,40 +182,77 @@ def load_policy(args, device, stats_meta):
         "features": {**cfg.input_features, **cfg.output_features},
         "norm_map": cfg.normalization_mapping,
     }
+    if args.checkpoint_stats:
+        # Third-party checkpoints ship the stats they were trained with. Overriding them
+        # with --dataset's would misscale their actions -- the same class of fault as the
+        # missing unnormalization this script now guards against.
+        pre_over = {"device_processor": {"device": device.type}}
+        post_over = {}
+    else:
+        pre_over = {"device_processor": {"device": device.type}, "normalizer_processor": norm}
+        post_over = {"unnormalizer_processor": norm}
     preprocessor, postprocessor = make_pre_post_processors(
         cfg,
         pretrained_path=args.policy,
-        preprocessor_overrides={"device_processor": {"device": device.type}, "normalizer_processor": norm},
+        preprocessor_overrides=pre_over,
         # The POST-processor needs the same stats. Without this it keeps whatever the
         # pretrained checkpoint shipped, the predicted actions are never mapped out of
         # normalized space, and every rollout drives the arm with z-scores -- ~25x too large
         # on the rotation dims. Nothing raises; the policy simply fails every task.
         # A validation loss cannot catch this: computing a loss only uses the preprocessor.
-        postprocessor_overrides={"unnormalizer_processor": norm},
+        postprocessor_overrides=post_over,
     )
-    _assert_unnormalizes(postprocessor, stats_meta, cfg)
-    return policy, cfg, preprocessor, postprocessor
+    _assert_unnormalizes(postprocessor, stats_meta, cfg, args)
+
+    # Resolve camera wiring from the config the policy actually loaded. Keys the config
+    # declares but we cannot supply (pi0's `empty_camera_*` padding slots) are left out
+    # deliberately -- _preprocess_images fills them with -1 and a zero attention mask.
+    cams = []
+    for key in cfg.image_features:
+        if "empty_camera" in key:
+            continue
+        if key not in CAMERA_ALIASES:
+            raise RuntimeError(
+                f"policy expects image feature {key!r}, which has no LIBERO camera mapping. "
+                f"Known: {sorted(CAMERA_ALIASES)}"
+            )
+        cams.append((key, CAMERA_ALIASES[key]))
+    if not cams:
+        raise RuntimeError(f"no usable camera inputs resolved from {list(cfg.image_features)}")
+    print(f"camera wiring: " + ", ".join(f"{r} -> {k}" for k, r in cams))
+    return policy, cfg, preprocessor, postprocessor, cams
 
 
-def _assert_unnormalizes(postprocessor, stats_meta, cfg):
+def _assert_unnormalizes(postprocessor, stats_meta, cfg, args):
     """Push a zero action through the postprocessor and check it lands in dataset units.
 
-    pi0 normalizes actions with MEAN_STD, so unnormalizing zeros must return the dataset
-    action mean. If the stats are missing or identity the result stays zero. This is the
-    functional version of the check -- it tests the pipeline that actually runs, not the
-    presence of a config key.
+    pi0 normalizes actions with MEAN_STD, so unnormalizing zeros must return the action mean.
+    If the stats are missing or identity the result stays exactly zero. This is the functional
+    version of the check -- it tests the pipeline that actually runs, not the presence of a
+    config key.
     """
     import numpy as _np
 
     mean = _np.asarray(stats_meta.stats["action"]["mean"], dtype=_np.float32)
     dim = cfg.output_features[ACTION].shape[0]
     got = postprocessor(torch.zeros(1, cfg.chunk_size, dim)).float().cpu().numpy()[0, 0]
-    if not _np.allclose(got, mean[:dim], atol=1e-3):
+    if args.checkpoint_stats:
+        # The checkpoint's own stats need not match --dataset's, so only require that
+        # unnormalization is happening at all.
+        if not _np.isfinite(got).all() or _np.allclose(got, 0.0, atol=1e-6):
+            raise RuntimeError(
+                f"post-processor is not unnormalizing: unnormalize(0) returned {got.round(4)}. "
+                "The checkpoint appears to ship no action stats; drop --checkpoint-stats."
+            )
+        print(f"unnormalize(0) = {got.round(4)} (checkpoint's own stats); "
+              f"{args.dataset} action mean = {mean[:dim].round(4)}")
+    elif not _np.allclose(got, mean[:dim], atol=1e-3):
         raise RuntimeError(
             "post-processor is not unnormalizing actions: unnormalize(0) returned "
             f"{got.round(4)}, expected the dataset action mean {mean[:dim].round(4)}. "
             "Rollouts would drive the robot with z-scores."
         )
+
 
 
 def make_env(bddl_file, resolution):
@@ -254,7 +315,7 @@ def verify_obs(args, device):
 
 
 def rollout_batch(policy, preprocessor, postprocessor, envs, instructions, max_steps, transform,
-                  device, autocast_ctx):
+                  device, autocast_ctx, cams):
     """Run one batch of episodes in lockstep. Returns per-episode (success, steps)."""
     n = len(envs)
     raws = []
@@ -272,15 +333,10 @@ def rollout_batch(policy, preprocessor, postprocessor, envs, instructions, max_s
 
     for t in range(max_steps):
         batch = {
-            "observation.images.image": torch.stack(
-                [to_chw01(transform(r["agentview_image"])) for r in raws]
-            ),
-            "observation.images.wrist_image": torch.stack(
-                [to_chw01(transform(r["robot0_eye_in_hand_image"])) for r in raws]
-            ),
-            "observation.state": torch.from_numpy(np.stack([build_state(r) for r in raws])),
-            "task": list(instructions),
+            key: torch.stack([to_chw01(transform(r[raw])) for r in raws]) for key, raw in cams
         }
+        batch["observation.state"] = torch.from_numpy(np.stack([build_state(r) for r in raws]))
+        batch["task"] = list(instructions)
         with autocast_ctx():
             action = policy.select_action(preprocessor(batch))
         action = postprocessor(action).float().cpu().numpy()
@@ -319,6 +375,12 @@ def main():
     p.add_argument("--image-transform", default="rot180", choices=list(IMAGE_TRANSFORMS))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-bf16", dest="bf16", action="store_false", default=True)
+    p.add_argument("--from-pretrained-config", action="store_true",
+                   help="inherit the checkpoint's own config.json (cameras, empty_cameras, ...) "
+                        "instead of library defaults + --dataset; needed for third-party checkpoints")
+    p.add_argument("--checkpoint-stats", action="store_true",
+                   help="use the normalization stats the checkpoint ships instead of --dataset's "
+                        "(required for third-party checkpoints trained on another mix)")
     p.add_argument("--merge-lora", action="store_true",
                    help="fold the adapter into the base weights (faster, but rounds in bf16)")
     p.add_argument("--out", type=Path, default=None)
@@ -352,7 +414,7 @@ def main():
         if lang not in train_tasks and R.rank == 0:
             print(f"[warn] task {tid} instruction {lang!r} is absent from {args.dataset}")
 
-    policy, cfg, preprocessor, postprocessor = load_policy(args, device, stats_meta)
+    policy, cfg, preprocessor, postprocessor, cams = load_policy(args, device, stats_meta)
     autocast_ctx = (
         (lambda: torch.autocast("cuda", dtype=torch.bfloat16))
         if args.bf16 and device.type == "cuda"
@@ -391,6 +453,7 @@ def main():
                 succ, steps = rollout_batch(
                     policy, preprocessor, postprocessor, envs,
                     [task.language] * len(chunk), max_steps, transform, device, autocast_ctx,
+                    cams,
                 )
                 for ep, s, st in zip(chunk, succ, steps):
                     results.append({"task_id": tid, "episode": ep, "success": bool(s), "steps": int(st)})
