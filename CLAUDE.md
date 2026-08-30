@@ -415,6 +415,211 @@ change and this fix has a meaningless spread. Re-measure before quoting one.
   into the window. Note `train_pi0.py`'s published samples/s does *not* do this, so its
   numbers and this script's are not directly comparable.
 
+## Closed-loop LIBERO evaluation (`scripts/eval_libero.py`)
+
+Validation loss is not the metric the literature reports. pi0 / OpenVLA / EO-1 LIBERO tables
+are **task success rates** from closed-loop rollouts, and no validation loss converts to one.
+This is what closes that gap.
+
+**Protocol** (the LIBERO/OpenVLA convention, so the numbers are comparable): all 10 tasks of
+a suite, 50 trials per task, trial *i* starting from the suite's *i*-th saved initial state
+(deterministic — no random resets), 10 no-op settle steps after reset, episode capped at the
+suite's own budget (280 steps for spatial) and scored a failure if the goal predicate never
+fires. 500 episodes per checkpoint.
+
+### The camera orientation is the trap, and it is silent
+
+`lerobot/libero_spatial_image` is an RLDS port, and the port **rotates the raw robosuite
+frame 180 degrees** (robosuite renders origin-bottom-left *and* mirrored). Feed the policy
+un-rotated frames and everything runs — no error, no warning, plausible-looking actions — and
+it scores near zero for a reason nothing in the logs explains.
+
+`--verify-obs` settles it by measurement rather than by reading source: it resets the env,
+builds the observation four ways, and scores each against a real dataset frame. Job 3108456:
+
+| transform | agentview MSE | wrist MSE |
+| --- | --- | --- |
+| none | 0.09549 | 0.13613 |
+| flipud | 0.07114 | 0.08945 |
+| fliplr | 0.06378 | 0.12276 |
+| **rot180** | **0.00599** | **0.01526** |
+
+An order of magnitude, on both cameras. Run `--verify-obs` again if the dataset ever changes.
+
+### The observation format is the dataset's, not lerobot's LiberoEnv default
+
+lerobot ships `lerobot/envs/libero.py` and a `LiberoEnv` config, but its feature map does
+**not** match the dataset we trained on:
+
+| | lerobot `LiberoEnv` | `lerobot/libero_spatial_image` (what we trained on) |
+| --- | --- | --- |
+| cameras | `observation.images.image` / `.image2` | `observation.images.image` / `.wrist_image` |
+| state | dict of `eef_pos`, `eef_quat`, `eef_mat`, `gripper_qpos`, ... | one 8-D vector `[eef_pos(3), eef_axis_angle(3), gripper_qpos(2)]` |
+
+So `eval_libero.py` drives `libero.libero.envs.OffScreenRenderEnv` directly and builds the
+dataset's format itself. Using lerobot's env config instead would run and score near zero,
+the same failure mode as the orientation.
+
+The script also checks each suite task's language string against the training set's task
+list and warns on a mismatch — a prompt the policy never saw is a third silent zero.
+
+### Normalization stats come from the *training* dataset, always
+
+`--dataset` names the dataset supplying `meta.stats`, and it defaults to the training set
+even when `--suite` points elsewhere. At deployment a policy has no access to the target
+suite's statistics; quietly substituting them would flatter any out-of-distribution number.
+
+### LoRA is not merged by default
+
+`merge_and_unload()` would save the adapter's extra matmuls on ~10^5 forward passes, but the
+merge happens in the load dtype and in bf16 it rounds — the rolled-out weights would no
+longer be the artefact being reported on. `--merge-lora` opts in.
+
+### Success rates, measured (job 3108565)
+
+500 episodes per checkpoint on the standard protocol (10 tasks x 50 trials from the suite's
+saved initial states, 280-step cap, `n_action_steps=5`). This is the number the literature
+reports and the gap TODO.md called the project's biggest credibility problem.
+
+| checkpoint | success rate | successes | val loss (n=3) |
+| --- | --- | --- | --- |
+| base `lerobot/pi0` zero-shot | 0.0% | 0/500 | 0.8719 +- 0.0048 |
+| LoRA `adapter_best` | **54.2% +- 2.2** | 271/500 | 0.3344 +- 0.0020 |
+| full FT `model_best` | **56.6% +- 2.2** | 283/500 | 0.3350 +- 0.0014 |
+
+**The success rate independently confirms the val-loss tie.** full FT - LoRA = +2.4 points,
+SE 3.1, **z = 0.76** — not significant, matching the 0.0006 val-loss gap that sits inside seed
+noise. Two unrelated metrics now say a 0.31%-parameter LoRA equals full fine-tuning of all
+4.03B. That was previously an inference from a loss; it is now a measurement of behaviour.
+
+**But they are not the same policy.** They tie in aggregate while differing per task, and two
+differences survive Bonferroni across the 10 tasks (|z| > 2.81):
+
+| task | LoRA | full FT | z |
+| --- | --- | --- | --- |
+| 5, "on the ramekin" | 30% | 6% | -3.29 |
+| 9, "on the wooden cabinet" | 34% | 62% | +2.92 |
+
+Their strengths cancel. No loss comparison could have surfaced this.
+
+**Base pi0 scores a clean 0/500.** That is the honest zero-shot floor — the released
+`lerobot/pi0` was never trained on LIBERO and has never seen this embodiment or action space.
+It is **not** the ~96% associated with pi0 on LIBERO-spatial, which comes from full
+fine-tuning with openpi's recipe; do not quote the paper's figure as "the baseline" here, and
+do not compare our 54.2% to it either. Different recipe, 0.31% of the parameters, 67 minutes.
+
+`n_action_steps=5` follows openpi's LIBERO replan interval and was **not** tuned here. It is
+the most obvious untested lever on these numbers.
+
+Cost: 27 min per 500 episodes on 4 GPUs when everything fails (base, no early termination),
+~23 min when roughly half succeed.
+
+### A good validation loss does not mean the policy works — the inference path is untested by it
+
+The first LIBERO evaluation scored **0/15 on `adapter_best`**, a checkpoint with a val loss
+of 0.3344 against base pi0's 0.8719. Exactly one of those numbers was wrong about the policy,
+and it was the rollout.
+
+**Cause:** `make_pre_post_processors` was given `preprocessor_overrides` but not
+`postprocessor_overrides`, so the unnormalizer kept whatever stats `lerobot/pi0` shipped
+instead of LIBERO's. Predicted actions reached the simulator as **z-scores** — roughly 25x
+too large on the rotation dims — so the arm flailed and nothing ever succeeded. Nothing
+raised.
+
+**The tell**, from `scripts/diagnose_libero.py`: predicted gripper `-1.08` where the expert
+commands `-1.0`. The dataset's action gripper stats are mean 0.084, std 0.996, and
+`(-1 - 0.084) / 0.996 = -1.088`. The output was in normalized units to three decimals.
+
+**Why no earlier check could have caught it.** Training only ever calls `policy.forward()`
+(the flow-matching loss), and `scripts/eval_adapter.py` does the same. Neither touches the
+inference path at all: unnormalization, the KV-cache prefill, the forced-eager attention, or
+the 10-step Euler integration in `sample_actions`. A good val loss and a broken sampler are
+fully compatible. **The val losses in this file are unaffected and stand.**
+
+Fixed, plus `_assert_unnormalizes()` in `eval_libero.py`: it pushes a zero action through the
+post-processor and requires the dataset action mean back (pi0 normalizes actions MEAN_STD),
+raising with expected-vs-actual otherwise. It tests the pipeline that runs rather than
+asserting a config key exists.
+
+Open-loop MAE on the same 16 val frames, before and after the one-line fix:
+
+| | dx | dy | dz | rx | ry | rz | grip |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| before | 0.534 | 0.462 | 0.473 | 0.462 | 0.509 | 0.843 | 0.241 |
+| after | 0.169 | 0.095 | 0.220 | 0.022 | 0.048 | 0.036 | 0.163 |
+| predict-the-mean baseline | 0.247 | 0.232 | 0.397 | 0.021 | 0.042 | 0.050 | 0.957 |
+
+5/7 dims beat the baseline, up from 1/7. (`rx`/`ry` sit at the noise floor — rotation barely
+varies in these demos, so there is almost nothing there to predict.) Closed loop on the same
+checkpoint went 0/15 to 7/15.
+
+**Generalise this:** any metric computed with `policy.forward()` certifies the forward pass
+and nothing else. Before trusting a rollout harness, make it reproduce a policy already known
+to be good — `scripts/diagnose_libero.py` exists to do that in four isolated checks
+(open-loop actions, state construction, image orientation, action convention), each of which
+can fail without the others noticing.
+
+### The dataset's own `meta/info.json` mislabels the state vector
+
+It declares `observation.state` as `['x','y','z','rx','ry','rz','rw','gripper']` — position
+plus a **quaternion** plus gripper. The statistics say otherwise: dim 3 has mean 3.06 and
+range [2.497, 3.457], impossible for a quaternion component, and dims 6-7 are [0, 0.041] and
+[-0.042, 0.001], the symmetric Panda finger-joint pair. The real layout is
+`[eef_pos(3), eef_axis_angle(3), gripper_qpos(2)]`, confirmed by check 2 of the diagnostic:
+an env-built state matched a real dataset frame at **L2 0.0054** against a per-dim std of
+0.10-0.41. The `names` field is inherited boilerplate from the port template. Trust the
+stats, not the card.
+
+### Installing the sim stack (the `egl-probe` wall)
+
+`lerobot[libero]` pulls `hf-libero`, which pins `robomimic==0.2.0`, which depends on the
+original `egl-probe` — and that package compiles C against EGL headers Athena's login node
+does not have, so `uv pip install` dies at the CMake step. `hf-libero` ships `hf-egl-probe`
+precisely to avoid this, but robomimic's own metadata still names the old one. `hf-egl-probe`
+fails to build for the same reason.
+
+Neither is actually needed: `egl_probe` is imported only inside `robomimic/envs/env_robosuite.py`
+and `env_ig_momart.py`, and LIBERO's `OffScreenRenderEnv` wraps robosuite directly. So:
+
+```bash
+uv pip install -c constraints.txt --no-deps hf-libero==0.1.4 robomimic==0.2.0
+uv pip install -c constraints.txt \
+  "hydra-core>=1.2,<1.4" "robosuite==1.4.0" "bddl==1.0.1" easydict einops thop \
+  "matplotlib>=3.5.3" "cloudpickle>=2.0.0" "mujoco>=3.0,<3.9" "future>=0.18.2" \
+  h5py psutil tqdm termcolor tensorboard tensorboardX imageio imageio-ffmpeg
+uv pip install --reinstall-package opencv-python-headless "opencv-python-headless==4.12.0.88"
+```
+
+`constraints.txt` pins torch/torchvision/torchcodec/transformers/numpy/lerobot/accelerate/
+peft/huggingface-hub to their installed versions. With it, the install is **49 pure additions
+— nothing removed, nothing downgraded**; verify with a `uv pip freeze` diff before and after.
+The last line matters because `robosuite` requires GUI `opencv-python`, which would clobber
+the headless `cv2` the rest of the stack was built on.
+
+This is why `lerobot[libero]` is still not in `pyproject.toml`: a plain `uv sync` cannot
+express the `--no-deps` step and would fail at `egl-probe`.
+
+### Runtime configuration
+
+- `MUJOCO_GL=egl`. Compute nodes have `libEGL_nvidia.so.0` and `/usr/share/glvnd/egl_vendor.d/10_nvidia.json`;
+  **login nodes have no GL at all**, so anything touching the renderer must run under SLURM.
+  `libOSMesa.so.8` is absent, so osmesa is not a fallback.
+- `MUJOCO_EGL_DEVICE_ID` / `EGL_DEVICE_ID` are set to `LOCAL_RANK` so each rank renders on
+  its own GPU.
+- `LIBERO_CONFIG_PATH=$SCRATCH/vla_finetuning/libero_config`. LIBERO otherwise writes
+  `~/.libero/config.yaml` **via an interactive `input()` prompt at import time**, which hangs
+  a batch job until it EOFs.
+- LIBERO's mesh/texture assets (422 MB) are not in the wheel; they download from the Hub to
+  `~/.cache/libero` on first use. Moved to `$SCRATCH/vla_finetuning/libero_assets` with a
+  symlink at `<site-packages>/libero/libero/assets`, because `$HOME` has a 10 GiB quota that
+  blocks job submission at 90% (see below).
+
+### Cost
+
+~13.5 s per episode at 2 envs/rank; `--envs-per-rank 8` amortises the policy forward across
+8 simultaneous rollouts. Episodes are dealt round-robin across ranks by `(task, trial)` so a
+straggler rank's share is not task-specific.
+
 ## Cluster facts (verified on Athena, 2026-08-16)
 
 These are measured, not assumed. Re-verify before relying on them if much time has passed.
@@ -659,11 +864,21 @@ none of it belongs in a 10 GB home directory or in the published repo.
 
 ## Next steps
 
-**B is implemented** (see "Full fine-tuning under FSDP" above); A is still open.
-**`TODO.md` holds the full outstanding list** — blockers, publishing prerequisites,
-evaluation gaps and housekeeping — and is the file to read first when picking this back up.
+**A and B are both done** (see "Closed-loop LIBERO evaluation" and "Full fine-tuning under
+FSDP" above). **`TODO.md` holds the full outstanding list** — publishing prerequisites, the
+remaining evaluation gaps and housekeeping — and is the file to read first when picking this
+back up.
 
-### A. Simulator rollouts, for numbers comparable to the literature
+### A. Simulator rollouts — **done**, see "Closed-loop LIBERO evaluation" above
+
+`scripts/eval_libero.py` (+ `diagnose_libero.py`, `render_results.py`) and three sbatch
+scripts. Measured: base 0.0%, LoRA 54.2% +- 2.2, full FT 56.6% +- 2.2 over 500 episodes each.
+The original planning notes below proved accurate about the time sink — EGL and the install,
+not the policy code — and missed the one that actually cost a run: the post-processor.
+
+#### Original planning notes
+
+*(Kept as written before the work, for the record. The gap described here is now closed.)*
 
 **Gap it closes:** we report a flow-matching *validation loss* (0.3343 +- 0.0015). Published
 pi0 / OpenVLA / EO-1 LIBERO results are **task success rates** from closed-loop rollouts.
@@ -704,8 +919,15 @@ than an assumption.
 
 ### Also outstanding, smaller
 
-- **Push `adapter_best/` to the Hub with a model card** (deliverable #2). Report val loss
-  *with* its std, and state plainly that no rollout success rate has been measured yet.
+- **Push `adapter_best/` and `model_best/` to the Hub** (deliverable #2). Cards are written
+  (`model_cards/`) and `scripts/publish_to_hub.py` applies them over PEFT's regenerated stub.
+  Both quote the re-measured val loss with its std *and* the success rate, and both warn
+  against reading our figures against published pi0 LIBERO tables.
+- **Out-of-distribution evaluation is now the interesting open question.** `eval_libero.py
+  --suite libero_object|libero_goal|libero_10` needs no retraining and ~1 GPU-hour. LoRA and
+  full FT tie in distribution but diverge sharply on individual tasks, so whether they
+  diverge further out of distribution is a real question, not a formality. Leave `--dataset`
+  on the training set so normalization stats stay deployment-faithful.
 - **More data beats more tuning on this split.** All four LIBERO suites is 1,693 episodes vs
   392, for ~9 h of compute we demonstrably have; it is the strongest lever against the
   overfitting documented above. Needs `MultiLeRobotDataset` from

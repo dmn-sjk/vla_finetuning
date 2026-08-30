@@ -240,6 +240,8 @@ is the number that makes runs comparable across different cluster shapes.
 
 | metric | value |
 | --- | --- |
+| **LIBERO-spatial success rate** | **54.2% ± 2.2** (271/500 closed-loop episodes) |
+| base π0, zero-shot, same protocol | 0.0% (0/500) |
 | best validation loss | **0.3343 ± 0.0015** (5 seeds) |
 | base π0, same split, no fine-tuning | 0.8719 ± 0.0048 (3 seeds) |
 | throughput | 89.3 samples/s on 8 GPUs (7.0× over 1 GPU, 87% scaling efficiency) |
@@ -305,15 +307,28 @@ The point of running it to convergence was to replace an assumption with a numbe
 artefacts were then re-evaluated with one script, one batch size and one set of seeds on the
 same 40 held-out episodes — the two training logs are not directly comparable to each other:
 
-| checkpoint | val loss (n=3) | best at | trainable | artefact | min GPUs |
-| --- | --- | --- | --- | --- | --- |
-| base π0 | 0.8719 ± 0.0048 | — | — | — | — |
-| LoRA `adapter_best` | **0.3344 ± 0.0020** | epoch 5 of 7 | 12.65M | 49 MB | 1 |
-| full FT `model_best` | **0.3350 ± 0.0014** | epoch 0 of 5 | 4,028M | 7.6 GB | 4 |
+| checkpoint | success rate | val loss (n=3) | best at | trainable | artefact | min GPUs |
+| --- | --- | --- | --- | --- | --- | --- |
+| base π0 | 0.0% | 0.8719 ± 0.0048 | — | — | — | — |
+| LoRA `adapter_best` | **54.2% ± 2.2** | **0.3344 ± 0.0020** | epoch 5 of 7 | 12.65M | 49 MB | 1 |
+| full FT `model_best` | **56.6% ± 2.2** | **0.3350 ± 0.0014** | epoch 0 of 5 | 4,028M | 7.6 GB | 4 |
 
-The two fine-tunes differ by 0.0006 — inside the ±0.002 seed noise, so **statistically
-indistinguishable**. LoRA reaches the same quality with 0.3% of the trainable parameters, a
-~160× smaller artefact, and a quarter of the hardware.
+**Two independent metrics agree.** The success-rate gap is +2.4 points with SE 3.1
+(z = 0.76); the val-loss gap is 0.0006, inside the ±0.002 seed noise. Both say
+**statistically indistinguishable**. LoRA reaches the same quality with 0.3% of the trainable
+parameters, a ~160× smaller artefact, and a quarter of the hardware.
+
+They are not the same policy, though. They tie in aggregate while differing per task, with
+two differences surviving Bonferroni across the 10 tasks: task 5 "on the ramekin" (LoRA 30%
+vs full FT 6%, z = −3.29) and task 9 "on the wooden cabinet" (34% vs 62%, z = +2.92). Their
+strengths cancel — something no loss comparison could show.
+
+Success rates come from 500 closed-loop episodes per checkpoint on the standard LIBERO
+protocol (10 tasks × 50 trials from the suite's saved initial states, 280-step cap). **Do not
+read 54.2% against the ~96% published for π0 on LIBERO-spatial**: that is full fine-tuning
+with openpi's recipe, not a 67-minute 12.65M-parameter LoRA. Equally, the 0.0% base row is a
+genuine zero-shot floor — the released `lerobot/pi0` never saw LIBERO — not the paper's
+number.
 
 Full fine-tuning reaches LoRA's quality in a single epoch and then collapses:
 
@@ -341,20 +356,21 @@ is why DeepSpeed ZeRO-3 cannot be used on this model at all.
 
 ## Next steps
 
-`TODO.md` is the authoritative list of what is not done, in dependency order — including two
-blockers (a `$HOME` quota that currently prevents job submission, and uncommitted Phase 2B
-work) and what publishing to the Hub still requires. `CLAUDE.md` has the detailed engineering
-notes.
+`TODO.md` is the authoritative list of what is not done. Nothing is blocked: the `$HOME`
+quota is clear and Phase 2B is committed. `CLAUDE.md` has the detailed engineering notes.
 
-**A — Simulator rollouts.** The number above is a *validation loss*. Published π0 / OpenVLA
-LIBERO results are **task success rates** from closed-loop rollouts, and the two are not
-convertible, so these results cannot yet be compared to the literature. Closing this needs the
-`lerobot[libero]` extra and headless MuJoCo (`MUJOCO_GL=egl`) on the compute nodes. This is the
-largest credibility gap in the current results.
+**A — Simulator rollouts.** *Done*, see the success rates above. `scripts/eval_libero.py`
+runs the standard LIBERO protocol; `scripts/diagnose_libero.py` exists because the first
+attempt scored 0% on a known-good checkpoint (the post-processor was never given the
+dataset's normalization stats, so rollouts drove the arm with z-scores — a validation loss
+cannot catch that, because computing one never touches the inference path).
 
-**B — Full fine-tuning under FSDP.** *Implemented*, see `train_pi0_fsdp.py` above.
+**B — Full fine-tuning under FSDP.** *Done*, see `train_pi0_fsdp.py` above.
 
-Smaller items: push `adapter_best/` to the Hub with a model card; train on all four LIBERO
-suites (1,693 episodes vs 392) as the strongest lever against the overfitting above; and the
-untouched regularisation knobs (`--weight-decay` is 0.0, `--lr` is 1e-4 against π0's own
-2.5e-5 default).
+Remaining: publish `adapter_best/` and `model_best/` to the Hub — cards are written
+(`model_cards/`) and `scripts/publish_to_hub.py` applies them; evaluate both checkpoints on a
+*different* LIBERO suite as an out-of-distribution test (~1 GPU-hour, no retraining, and the
+per-task divergence above makes it a real question); train on all four LIBERO suites (1,693
+episodes vs 392) as the strongest lever against the overfitting; and the untouched
+regularisation knobs (`--weight-decay` is 0.0, `--lr` is 1e-4 against π0's own 2.5e-5
+default).

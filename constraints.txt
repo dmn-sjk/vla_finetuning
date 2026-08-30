@@ -1,0 +1,17 @@
+# Pins for installing the LIBERO simulator stack into an existing training venv.
+#
+# `hf-libero` drags in robosuite/robomimic/mujoco, an ecosystem old enough that its
+# resolver will happily downgrade numpy or pull a PyPI (CPU) torch over the cu128 one.
+# Passing this with `uv pip install -c constraints.txt` makes the install 49 pure
+# additions: nothing removed, nothing downgraded. Verify with a `uv pip freeze` diff.
+#
+# See CLAUDE.md, "Installing the sim stack (the egl-probe wall)".
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+torchcodec==0.11.1+cu128
+transformers==5.5.4
+numpy==2.2.6
+lerobot==0.6.1
+accelerate==1.14.0
+peft==0.20.0
+huggingface-hub==1.27.0

@@ -1,0 +1,448 @@
+"""Closed-loop LIBERO rollouts: the success-rate metric the literature actually reports.
+
+Validation loss says how well the policy predicts a held-out expert action chunk. It says
+nothing about whether the robot puts the bowl on the plate, and pi0/OpenVLA LIBERO tables
+are success rates. This script closes that gap so our numbers are comparable to published
+ones instead of merely internally consistent.
+
+Protocol follows the LIBERO/OpenVLA convention, which is what the published tables use:
+  * all 10 tasks of a suite, 50 trials per task, trial i starting from the suite's i-th
+    saved initial state (deterministic, not random) -> 500 episodes;
+  * 10 no-op steps after reset so objects settle before the first observation;
+  * episode capped at the suite's own step budget (280 for spatial), counted as a failure
+    if the goal predicate never fires.
+
+Observation format is the *dataset's*, not lerobot's LiberoEnv default. The port we trained
+on (`lerobot/libero_spatial_image`) uses `observation.images.image` +
+`observation.images.wrist_image` and a single 8-D state
+`[eef_pos(3), eef_axis_angle(3), gripper_qpos(2)]`, whereas lerobot's own LIBERO env config
+emits `image`/`image2` and a dict of separate state keys. Feeding the policy the latter
+would run, and would quietly score near zero. `--verify-obs` checks the images we build
+against real dataset frames before any of that can bite.
+
+    # one-off: confirm camera orientation matches the training data
+    srun ... python scripts/eval_libero.py --verify-obs
+
+    # the real thing, 8 ranks x 8 envs
+    torchrun --nproc_per_node=8 scripts/eval_libero.py \
+        --adapter <run>/adapter_best --out results/lora.json
+"""
+
+import argparse
+import contextlib
+import json
+import os
+import sys
+from collections import defaultdict
+from datetime import timedelta
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# MuJoCo must pick its renderer before robosuite imports it. On Athena's compute nodes
+# libEGL_nvidia.so.0 is present and there is no X server, so EGL is the only option that
+# works headless; osmesa is not installed. Each rank renders on its own GPU.
+os.environ.setdefault("MUJOCO_GL", "egl")
+_LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
+os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", str(_LOCAL_RANK))
+os.environ.setdefault("EGL_DEVICE_ID", str(_LOCAL_RANK))
+
+import train_pi0 as T  # noqa: E402,F401  (runs preload_npp before torchcodec is imported)
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import torch.distributed as dist  # noqa: E402
+
+from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # noqa: E402
+from lerobot.policies.factory import make_policy, make_pre_post_processors  # noqa: E402
+from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
+from lerobot.utils.constants import ACTION  # noqa: E402
+
+# LIBERO's own per-suite step budgets (lerobot/envs/libero.py mirrors these). A cap that is
+# too tight turns slow-but-correct rollouts into failures and understates the policy.
+SUITE_MAX_STEPS = {
+    "libero_spatial": 280,
+    "libero_object": 280,
+    "libero_goal": 300,
+    "libero_10": 520,
+    "libero_90": 400,
+}
+NUM_STEPS_WAIT = 10  # settle steps after reset, before the policy sees anything
+DUMMY_ACTION = np.array([0, 0, 0, 0, 0, 0, -1], dtype=np.float32)
+
+# robosuite renders origin-bottom-left AND mirrored, so the RLDS->LeRobot port rotates the
+# frame 180 degrees. Measured, not assumed -- --verify-obs (job 3108456) scored the four
+# candidates against real dataset frames and rot180 won by an order of magnitude on both
+# cameras (agentview MSE 0.006 vs 0.064-0.095, wrist 0.015 vs 0.089-0.136). Any other choice
+# runs perfectly and scores near zero, with nothing in the logs to explain it.
+IMAGE_TRANSFORMS = {
+    "none": lambda a: a,
+    "flipud": lambda a: a[::-1],
+    "fliplr": lambda a: a[:, ::-1],
+    "rot180": lambda a: a[::-1, ::-1],
+}
+
+
+def quat2axisangle(quat):
+    """robosuite's xyzw quaternion -> axis*angle, the 3 middle dims of the dataset state."""
+    from robosuite.utils.transform_utils import quat2axisangle as _q2aa
+
+    return _q2aa(np.asarray(quat))
+
+
+def build_state(raw):
+    return np.concatenate(
+        [raw["robot0_eef_pos"], quat2axisangle(raw["robot0_eef_quat"]), raw["robot0_gripper_qpos"]]
+    ).astype(np.float32)
+
+
+def to_chw01(img_hwc_uint8):
+    """Environment frame -> the float32 CHW [0,1] tensor the dataset loader produces."""
+    a = np.ascontiguousarray(img_hwc_uint8)
+    return torch.from_numpy(a).permute(2, 0, 1).float().div_(255.0)
+
+
+class Rank:
+    """Minimal distributed helper: this script only ever needs rank/world and one gather."""
+
+    def __init__(self):
+        self.world = int(os.environ.get("WORLD_SIZE", "1"))
+        self.rank = int(os.environ.get("RANK", "0"))
+        self.local = _LOCAL_RANK
+        self.dist = self.world > 1
+        if self.dist:
+            # The only collective is the final gather, which blocks until every rank has
+            # finished all of its episodes. Ranks are dealt an even count but not an even
+            # amount of *work* -- a successful episode terminates early, a failed one runs
+            # the full 280 steps -- so skew of tens of minutes is normal and NCCL's default
+            # timeout would abort a run that is merely uneven.
+            dist.init_process_group(backend="nccl", timeout=timedelta(hours=2))
+
+    def gather(self, obj):
+        if not self.dist:
+            return [obj]
+        out = [None] * self.world
+        dist.all_gather_object(out, obj)
+        return out
+
+    def close(self):
+        if self.dist:
+            dist.barrier()
+            dist.destroy_process_group()
+
+
+def load_policy(args, device, stats_meta):
+    cfg = PI0Config(
+        pretrained_path=args.policy,
+        device=device.type,
+        dtype="bfloat16" if args.bf16 else "float32",
+    )
+    if args.n_action_steps is not None:
+        cfg.n_action_steps = args.n_action_steps
+    policy = make_policy(cfg, ds_meta=stats_meta)
+    if args.adapter is not None:
+        from peft import PeftModel
+
+        policy = PeftModel.from_pretrained(policy, str(args.adapter))
+        if args.merge_lora:
+            # Folding LoRA into the base weights skips the adapter's extra matmuls on every
+            # one of ~10^5 forward passes, but the merge happens in the load dtype: in
+            # bf16 it rounds, so the rolled-out weights are no longer bit-identical to the
+            # artefact being reported on. Off by default -- the number should describe the
+            # adapter as published, not a re-rounded copy of it.
+            policy = policy.merge_and_unload()
+    policy.to(device).eval()
+
+    norm = {
+        "stats": stats_meta.stats,
+        "features": {**cfg.input_features, **cfg.output_features},
+        "norm_map": cfg.normalization_mapping,
+    }
+    preprocessor, postprocessor = make_pre_post_processors(
+        cfg,
+        pretrained_path=args.policy,
+        preprocessor_overrides={"device_processor": {"device": device.type}, "normalizer_processor": norm},
+        # The POST-processor needs the same stats. Without this it keeps whatever the
+        # pretrained checkpoint shipped, the predicted actions are never mapped out of
+        # normalized space, and every rollout drives the arm with z-scores -- ~25x too large
+        # on the rotation dims. Nothing raises; the policy simply fails every task.
+        # A validation loss cannot catch this: computing a loss only uses the preprocessor.
+        postprocessor_overrides={"unnormalizer_processor": norm},
+    )
+    _assert_unnormalizes(postprocessor, stats_meta, cfg)
+    return policy, cfg, preprocessor, postprocessor
+
+
+def _assert_unnormalizes(postprocessor, stats_meta, cfg):
+    """Push a zero action through the postprocessor and check it lands in dataset units.
+
+    pi0 normalizes actions with MEAN_STD, so unnormalizing zeros must return the dataset
+    action mean. If the stats are missing or identity the result stays zero. This is the
+    functional version of the check -- it tests the pipeline that actually runs, not the
+    presence of a config key.
+    """
+    import numpy as _np
+
+    mean = _np.asarray(stats_meta.stats["action"]["mean"], dtype=_np.float32)
+    dim = cfg.output_features[ACTION].shape[0]
+    got = postprocessor(torch.zeros(1, cfg.chunk_size, dim)).float().cpu().numpy()[0, 0]
+    if not _np.allclose(got, mean[:dim], atol=1e-3):
+        raise RuntimeError(
+            "post-processor is not unnormalizing actions: unnormalize(0) returned "
+            f"{got.round(4)}, expected the dataset action mean {mean[:dim].round(4)}. "
+            "Rollouts would drive the robot with z-scores."
+        )
+
+
+def make_env(bddl_file, resolution):
+    from libero.libero.envs import OffScreenRenderEnv
+
+    # LIBERO's default controller is robosuite OSC_POSE with control_delta=true and
+    # input range [-1, 1], which is exactly the convention of the dataset's 7-D action
+    # (deltas +-0.938 in xyz, small in rotation, gripper +-1) -- checked, not assumed, since
+    # an absolute-vs-delta mismatch would drive the arm to the workspace edge on step one.
+    # initialization_noise=None keeps resets deterministic given the saved initial state.
+    env = OffScreenRenderEnv(
+        bddl_file_name=bddl_file,
+        camera_heights=resolution,
+        camera_widths=resolution,
+    )
+    env.seed(0)
+    return env
+
+
+def verify_obs(args, device):
+    """Compare env frames against real dataset frames under each candidate flip.
+
+    The camera is fixed and the background (table, robot base, walls) dominates the frame,
+    so the correct orientation wins by a wide margin even though the env's initial state and
+    the dataset episode's are not the same draw. A silent mismatch here would leave the
+    policy looking at upside-down images and score ~0% for a reason no metric would explain.
+    """
+    from libero.libero import benchmark, get_libero_path
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    suite = benchmark.get_benchmark_dict()[args.suite]()
+    task = suite.get_task(0)
+    bddl = os.path.join(get_libero_path("bddl_files"), task.problem_folder, task.bddl_file)
+    init_states = torch.load(
+        os.path.join(get_libero_path("init_states"), task.problem_folder, task.init_states_file),
+        weights_only=False,
+    )
+    env = make_env(bddl, args.resolution)
+    env.reset()
+    raw = env.set_init_state(init_states[0])
+    for _ in range(NUM_STEPS_WAIT):
+        raw, _, _, _ = env.step(DUMMY_ACTION)
+
+    ds = LeRobotDataset(args.dataset, episodes=[0])
+    frame = ds[0]
+    print(f"env task: {task.language!r}")
+    print(f"dataset frame keys: {[k for k in frame if k.startswith('observation')]}")
+
+    for cam, key in (
+        ("agentview_image", "observation.images.image"),
+        ("robot0_eye_in_hand_image", "observation.images.wrist_image"),
+    ):
+        ref = frame[key].float().numpy()  # CHW [0,1]
+        print(f"\n{cam} vs {key}:")
+        for name, fn in IMAGE_TRANSFORMS.items():
+            cand = to_chw01(fn(raw[cam])).numpy()
+            print(f"  {name:>7}: MSE={float(((cand - ref) ** 2).mean()):.5f}")
+    env.close()
+    print("\nPick the transform with the clearly lowest MSE on BOTH cameras.")
+
+
+def rollout_batch(policy, preprocessor, postprocessor, envs, instructions, max_steps, transform,
+                  device, autocast_ctx):
+    """Run one batch of episodes in lockstep. Returns per-episode (success, steps)."""
+    n = len(envs)
+    raws = []
+    for env, init in envs:
+        env.reset()
+        raw = env.set_init_state(init)
+        for _ in range(NUM_STEPS_WAIT):
+            raw, _, _, _ = env.step(DUMMY_ACTION)
+        raws.append(raw)
+
+    policy.reset()
+    done = [False] * n
+    success = [False] * n
+    steps = [max_steps] * n
+
+    for t in range(max_steps):
+        batch = {
+            "observation.images.image": torch.stack(
+                [to_chw01(transform(r["agentview_image"])) for r in raws]
+            ),
+            "observation.images.wrist_image": torch.stack(
+                [to_chw01(transform(r["robot0_eye_in_hand_image"])) for r in raws]
+            ),
+            "observation.state": torch.from_numpy(np.stack([build_state(r) for r in raws])),
+            "task": list(instructions),
+        }
+        with autocast_ctx():
+            action = policy.select_action(preprocessor(batch))
+        action = postprocessor(action).float().cpu().numpy()
+
+        for i, (env, _) in enumerate(envs):
+            if done[i]:
+                continue  # finished episodes are frozen, not stepped: their actions are moot
+            raw, _, term, _ = env.step(action[i])
+            raws[i] = raw
+            if env.check_success():
+                success[i], done[i], steps[i] = True, True, t + 1
+            elif term:
+                done[i], steps[i] = True, t + 1
+        if all(done):
+            break
+    return success, steps
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--adapter", type=Path, default=None, help="PEFT adapter dir; omit for a full checkpoint")
+    p.add_argument("--policy", default="lerobot/pi0", help="base weights or a full fine-tuned dir")
+    p.add_argument("--suite", default="libero_spatial")
+    # Normalization stats come from the *training* dataset even when rolling out another
+    # suite: at deployment the policy has no access to the target suite's statistics, and
+    # silently swapping them in would flatter an out-of-distribution result.
+    p.add_argument("--dataset", default="lerobot/libero_spatial_image",
+                   help="dataset supplying normalization stats (keep as the TRAINING set)")
+    p.add_argument("--episodes-per-task", type=int, default=50, help="LIBERO convention: 50")
+    p.add_argument("--task-ids", type=int, nargs="*", default=None)
+    p.add_argument("--envs-per-rank", type=int, default=8)
+    p.add_argument("--resolution", type=int, default=256, help="must match the dataset (256)")
+    p.add_argument("--n-action-steps", type=int, default=5,
+                   help="steps executed per predicted 50-chunk; openpi's LIBERO eval replans every 5")
+    p.add_argument("--max-steps", type=int, default=None)
+    p.add_argument("--image-transform", default="rot180", choices=list(IMAGE_TRANSFORMS))
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-bf16", dest="bf16", action="store_false", default=True)
+    p.add_argument("--merge-lora", action="store_true",
+                   help="fold the adapter into the base weights (faster, but rounds in bf16)")
+    p.add_argument("--out", type=Path, default=None)
+    p.add_argument("--verify-obs", action="store_true")
+    args = p.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.cuda.set_device(_LOCAL_RANK)
+
+    if args.verify_obs:
+        verify_obs(args, device)
+        return
+
+    R = Rank()
+    torch.manual_seed(args.seed + 1000 * R.rank)
+
+    from libero.libero import benchmark, get_libero_path
+
+    suite = benchmark.get_benchmark_dict()[args.suite]()
+    task_ids = args.task_ids if args.task_ids is not None else list(range(len(suite.tasks)))
+    max_steps = args.max_steps or SUITE_MAX_STEPS.get(args.suite, 500)
+    transform = IMAGE_TRANSFORMS[args.image_transform]
+
+    stats_meta = LeRobotDatasetMetadata(args.dataset)
+    # A prompt the policy never saw in training scores near zero for reasons no metric
+    # explains, so check the suite's wording against the training set's before rolling out.
+    train_tasks = {str(t[0]) for t in stats_meta.episodes.to_pandas()["tasks"]}
+    for tid in task_ids:
+        lang = suite.get_task(tid).language
+        if lang not in train_tasks and R.rank == 0:
+            print(f"[warn] task {tid} instruction {lang!r} is absent from {args.dataset}")
+
+    policy, cfg, preprocessor, postprocessor = load_policy(args, device, stats_meta)
+    autocast_ctx = (
+        (lambda: torch.autocast("cuda", dtype=torch.bfloat16))
+        if args.bf16 and device.type == "cuda"
+        else contextlib.nullcontext
+    )
+
+    # Work unit is one episode = (task_id, trial). Dealt round-robin so ranks get an even
+    # mix of tasks rather than whole tasks, which would make a straggler rank's failures
+    # task-specific and skew a partial result.
+    jobs = [(tid, ep) for tid in task_ids for ep in range(args.episodes_per_task)]
+    mine = jobs[R.rank :: R.world]
+    if R.rank == 0:
+        print(f"{len(jobs)} episodes over {len(task_ids)} tasks, {R.world} rank(s), "
+              f"{args.envs_per_rank} env(s)/rank, n_action_steps={cfg.n_action_steps}, "
+              f"max_steps={max_steps}, transform={args.image_transform}", flush=True)
+
+    # Group a rank's episodes by task so one batch shares a bddl file and one env can be
+    # reused across its trials — env construction dominates otherwise.
+    by_task = defaultdict(list)
+    for tid, ep in mine:
+        by_task[tid].append(ep)
+
+    results = []
+    for tid, eps in sorted(by_task.items()):
+        task = suite.get_task(tid)
+        bddl = os.path.join(get_libero_path("bddl_files"), task.problem_folder, task.bddl_file)
+        init_states = torch.load(
+            os.path.join(get_libero_path("init_states"), task.problem_folder, task.init_states_file),
+            weights_only=False,
+        )
+        pool = [make_env(bddl, args.resolution) for _ in range(min(args.envs_per_rank, len(eps)))]
+        try:
+            for i in range(0, len(eps), len(pool)):
+                chunk = eps[i : i + len(pool)]
+                envs = [(pool[j], init_states[ep % len(init_states)]) for j, ep in enumerate(chunk)]
+                succ, steps = rollout_batch(
+                    policy, preprocessor, postprocessor, envs,
+                    [task.language] * len(chunk), max_steps, transform, device, autocast_ctx,
+                )
+                for ep, s, st in zip(chunk, succ, steps):
+                    results.append({"task_id": tid, "episode": ep, "success": bool(s), "steps": int(st)})
+                nd = sum(r["success"] for r in results)
+                print(f"[rank {R.rank}] task {tid} {i + len(chunk)}/{len(eps)} "
+                      f"running {nd}/{len(results)}", flush=True)
+        finally:
+            for e in pool:
+                e.close()
+
+    gathered = [r for part in R.gather(results) for r in part]
+
+    if R.rank == 0:
+        per_task = defaultdict(list)
+        for r in gathered:
+            per_task[r["task_id"]].append(r["success"])
+        overall = float(np.mean([r["success"] for r in gathered]))
+        # Binomial standard error: with 50 trials/task the per-task figure is worth about
+        # +-7 points, so per-task ordering should not be over-read.
+        se = (overall * (1 - overall) / max(len(gathered), 1)) ** 0.5
+        print("\n=== per-task success ===")
+        for tid in sorted(per_task):
+            v = per_task[tid]
+            print(f"  task {tid}: {np.mean(v) * 100:5.1f}%  ({sum(v)}/{len(v)})  "
+                  f"{suite.get_task(tid).language[:52]!r}")
+        print(f"\nSUCCESS_RATE suite={args.suite} rate={overall * 100:.1f} "
+              f"se={se * 100:.1f} n={len(gathered)} "
+              f"n_action_steps={cfg.n_action_steps} checkpoint={args.adapter or args.policy}")
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            json.dump(
+                {
+                    "suite": args.suite,
+                    "checkpoint": str(args.adapter or args.policy),
+                    "policy": str(args.policy),
+                    "stats_dataset": args.dataset,
+                    "n_action_steps": cfg.n_action_steps,
+                    "max_steps": max_steps,
+                    "image_transform": args.image_transform,
+                    "seed": args.seed,
+                    "success_rate": overall,
+                    "stderr": se,
+                    "n_episodes": len(gathered),
+                    "per_task": {str(k): float(np.mean(v)) for k, v in sorted(per_task.items())},
+                    "episodes": sorted(gathered, key=lambda r: (r["task_id"], r["episode"])),
+                },
+                open(args.out, "w"),
+                indent=2,
+            )
+            print(f"wrote {args.out}")
+    R.close()
+
+
+if __name__ == "__main__":
+    main()

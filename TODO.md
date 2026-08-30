@@ -1,10 +1,10 @@
 # TODO
 
-State as of 2026-08-29. Phases 1, 2 (LoRA+DDP) and 2B (full FT under FSDP) are implemented
+State as of 2026-08-30. Phases 1, 2 (LoRA+DDP) and 2B (full FT under FSDP) are implemented
 and measured; `CLAUDE.md` has the engineering notes and every measured number. What follows
 is what is *not* done.
 
-Ordered by what blocks what. Items 1–2 block everything else.
+Nothing is blocked. What remains is publishing, one optional evaluation, and cleanup.
 
 ---
 
@@ -31,79 +31,55 @@ own best, and full FT's final has given back essentially the whole gain.
 
 ---
 
-## 1. BLOCKER: `$HOME` quota — no jobs can be submitted
+## 1-2. Former blockers — both cleared
 
-`$HOME` is at **9.34 / 10 GiB (93.4%)** and Athena's job-submit plugin rejects outright:
-
-```
-sbatch: error: Storage quota of $HOME exceeded (over 90% full)!
-```
-
-Confirmed with `sbatch --test-only`. Nothing below that needs a GPU can start until this is
-cleared. The growth is **not** from this project — largest consumers are `.local/share`
-(2.8 G), `.vscode-server` (2.8 G), `.cache/torch` (1.1 G), `.cursor-server` (353 M).
-Clearing `.cache/torch` alone would probably suffice.
-
-## 2. BLOCKER: Phase 2B is uncommitted
-
-Seven files sit in the working tree with no commit:
-
-```
- M CLAUDE.md  README.md  scripts/eval_adapter.py
-?? train_pi0_fsdp.py
-?? slurm/pi0_fsdp_{preflight,smoke,bench,verify_export}.sbatch
-?? slurm/pi0_{full_train,compare_checkpoints}.sbatch
-```
-
-`train_pi0.py` is deliberately byte-identical to the committed version — the LoRA + DDP
-production recipe was never touched. Note `scripts/eval_adapter.py` carries a **bug fix**
-(see §5) that changes what `--repeats` reports, so anything measured with it before
-2026-08-18 has a meaningless spread.
+`$HOME` quota is back to 6.5 / 10 GiB and jobs submit normally. Phase 2B was committed
+(`bb39235`). Keep LIBERO's assets out of `$HOME`: they download to `~/.cache/libero` by
+default and are now redirected to `$SCRATCH` (see `CLAUDE.md`, "Runtime configuration").
 
 ---
 
-## 3. Evaluation: there is no test set, and loss is the wrong metric anyway
+## 3. Evaluation
 
-Two separate problems, often conflated.
+### 3b. Success rates — **DONE** (job 3108565, 2026-08-30)
 
-### 3a. No test split exists
+500 episodes per checkpoint on the standard LIBERO protocol. base 0.0% (0/500),
+LoRA `adapter_best` **54.2% ± 2.2** (271/500), full FT `model_best` **56.6% ± 2.2**
+(283/500). The +2.4 point gap has SE 3.1 (z = 0.76): **not significant**, independently
+confirming the validation-loss tie. Details and caveats in `CLAUDE.md`, "Success rates,
+measured".
 
-The 432 episodes of `lerobot/libero_spatial_image` are split **392 train / 40 val**, with
-nothing held back. Worse, those 40 val episodes were used for best-epoch selection in both
-runs, so they are not a clean set to *report* on either — the reported numbers are
-selection-biased, if only slightly.
+The path there cost one wrong run and is worth not repeating: the post-processor was never
+given the dataset's stats, so rollouts drove the arm with z-scores and a good checkpoint
+scored 0/15. See `CLAUDE.md`, "A good validation loss does not mean the policy works".
+`scripts/diagnose_libero.py` is the tool that localised it.
 
-Options, in increasing order of cost:
+### 3a. No test split exists — still true, and still mostly fine
 
-- **Evaluate on a different LIBERO suite** (`libero_object`, `libero_goal`, `libero_10`) as
-  an out-of-distribution held-out set. Cheapest, needs no retraining, and answers a more
-  interesting question than an in-distribution test loss: did adapting to LIBERO-spatial
-  cost anything elsewhere? Expect the full-FT `model_best` to look much worse than the LoRA
-  adapter here — that is the prediction worth testing.
-- **Re-split 392/20/20** and retrain both runs. Clean, but invalidates every number
-  currently in `CLAUDE.md` and costs ~4 GPU-hours (LoRA ~1 h on 8 GPUs, full FT ~3.3 h on 4).
+The 432 episodes are split 392 train / 40 val with nothing held back, and those 40 were also
+used for best-epoch selection, so the *validation loss* is mildly selection-biased. Two
+things reduce how much this matters now:
 
-Whichever is chosen, run it through `scripts/eval_adapter.py` with `--repeats 5` so the
-number carries a spread. Do not quote a bare val loss (see §5).
+- The **success rates are not affected at all.** They are measured on the simulator's own 50
+  saved initial states per task, which are not dataset episodes and played no part in
+  checkpoint selection. The headline metric is clean.
+- The bias is small where it applies. `adapter_best` scored 0.3273 at selection time and
+  0.3344 on a clean 3-seed reload — a ~0.007 gap, matching the documented training-time
+  noise, against a 0.54 improvement over base. **Publish the re-measured 0.3344, never the
+  0.3273 that drove selection.** For full FT the best epoch was epoch 0 of a monotonically
+  worsening curve, so there was effectively nothing to cherry-pick.
 
-### 3b. Success rates, not loss, are what the literature reports
+Re-splitting and retraining to fix ~0.007 of bias on a metric that is no longer the headline
+is not worth ~4 GPU-hours. **The genuinely open evaluation question is out-of-distribution
+generalization**, not a clean in-distribution test loss:
 
-π0 and OpenVLA report LIBERO **task success rates** from closed-loop rollouts. A
-flow-matching validation loss does not convert to that, so **no test loss, however clean,
-makes these results comparable to published tables.** This is the single biggest credibility
-gap in the project.
-
-Needs:
-- `lerobot[libero]` (adds `hf-libero`, pulls LIBERO sim + MuJoCo) — deliberately excluded
-  from `pyproject.toml` today; re-lock and re-verify when adding.
-- Headless GL on compute nodes: expect `MUJOCO_GL=egl` (or `osmesa`). This, not the policy
-  code, is the likely time sink.
-- Rollouts use `policy.select_action`, not `forward`; `PI0Config.n_action_steps` controls
-  how much of the 50-step chunk is executed per inference.
-- Rollouts are sequential per episode and CPU/sim-bound — parallelise across *episodes* by
-  rank, not by batching.
-
----
+- **Evaluate on another LIBERO suite** (`libero_object`, `libero_goal`, `libero_10`; all
+  available as `_image` ports). No retraining, ~1 GPU-hour with `eval_libero.py --suite`.
+  The interesting prediction to test: LoRA and full FT tie in-distribution but differ sharply
+  per task (task 5: 30% vs 6%; task 9: 34% vs 62%), so they may diverge much further out of
+  distribution — full FT touched all 4.03B parameters and has more to forget.
+  `--dataset` already defaults to the *training* set's normalization stats, which is the
+  correct deployment-faithful choice; do not point it at the target suite.
 
 ## 4. Publishing to the HF Hub
 
@@ -113,10 +89,11 @@ Account `dmnsjk` currently has **0 models**. Deliverable #2 is entirely outstand
 
 - **`adapter_best/` — yes.** 48 MB, val 0.3344 ± 0.0020, and the artefact the project is
   actually about.
-- **`model_best/` — probably not as a *model*.** 7.6 GB for a result statistically tied with
-  the 48 MB adapter (0.3350 ± 0.0014 vs 0.3344 ± 0.0020; the 0.0006 gap is inside the noise).
-  It is an artefact of the sharding experiment, not a better policy. If published at all, the
-  card must say so plainly.
+- **`model_best/` — yes, but framed as the control arm.** 7.6 GB for a result tied with the
+  48 MB adapter on *both* metrics (56.6% ± 2.2 vs 54.2% ± 2.2, z = 0.76; 0.3350 ± 0.0014 vs
+  0.3344 ± 0.0020). It is not a better policy. It is now worth publishing anyway because the
+  per-task breakdown shows the two are genuinely *different* policies that happen to tie,
+  which makes the pair more useful than either alone. The card says all of this plainly.
 - **`adapter/` and `model/` (final-epoch) — no.** Both are worse than their own best, and
   `model/` has lost essentially the entire fine-tuning gain (0.8361 vs base 0.8719).
 
@@ -126,11 +103,14 @@ Account `dmnsjk` currently has **0 models**. Deliverable #2 is entirely outstand
 `[More Information Needed]`. It is also regenerated on every export, so the card belongs in
 the repo and should be copied in at publish time, not hand-edited in the run directory.
 
-Must contain: base model and link; dataset and the exact episode split; LoRA config
-(r=32, alpha=64, dropout=0.05, `attention` target preset, 12.65M trainable = 0.31%);
-optimizer and schedule; hardware (8× A100-40GB, 67 min, 89.3 samples/s, 11.7 GiB peak);
-**val loss with its std and the 0.8719 base reference**; an inference snippet; the licence
-note in §4c; and an explicit statement that **no task success rate has been measured**.
+**Written**: `model_cards/pi0-libero-spatial-{lora,full}.md`, applied at publish time by
+`scripts/publish_to_hub.py` (which overwrites whatever stub PEFT regenerated). Both carry
+base model and link, dataset and exact split, LoRA config, optimizer/schedule, hardware and
+wall clock, the success-rate table with per-task breakdown, the re-measured val loss with its
+std and the 0.8719 base reference, an inference snippet, the `rot180` warning, and the §4c
+licence note. Both state explicitly that 54.2%/56.6% must **not** be read against the ~96%
+published for pi0 on LIBERO-spatial, and that the 0.0% base row is a zero-shot floor rather
+than the paper's number.
 
 ### 4c. Licence — not a blocker, but must be documented
 
@@ -150,6 +130,20 @@ automatically. Suggested repo names: `dmnsjk/pi0-libero-spatial-lora` and, if pu
 ---
 
 ## 5. Carry-forward warnings
+
+- **A validation loss certifies `policy.forward()` and nothing else.** It never touches the
+  inference path — unnormalization, KV-cache prefill, the Euler integration in
+  `sample_actions`. A good val loss is fully compatible with a policy that scores 0% in
+  closed loop; that is exactly what happened here. Before trusting any rollout harness, make
+  it reproduce a checkpoint already known to be good.
+- **`make_pre_post_processors` needs `postprocessor_overrides` too.** Passing only
+  `preprocessor_overrides` leaves the unnormalizer on the pretrained checkpoint's stats and
+  the policy emits z-scores. `_assert_unnormalizes()` in `eval_libero.py` now catches this at
+  load time; any new script that builds processors should call it or repeat the check.
+- **LIBERO camera frames need `rot180`** to match the training data. Wrong orientation runs
+  silently and scores ~0%. Re-run `eval_libero.py --verify-obs` if the dataset changes.
+- **Do not trust `meta/info.json`'s `names` for `observation.state`.** It claims a quaternion;
+  the real layout is `[eef_pos(3), eef_axis_angle(3), gripper_qpos(2)]`. Trust the stats.
 
 - **`scripts/eval_adapter.py --repeats` was reporting a structural zero** until 2026-08-18.
   The script seeded with `torch.manual_seed()` before calling `T.evaluate()`, which re-seeds
