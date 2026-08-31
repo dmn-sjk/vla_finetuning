@@ -128,6 +128,22 @@ Checked on 2026-08-29:
 
 ### 4d. Mechanics
 
+**`scripts/publish.sh` does all of it.** Dry run by default; `--go` uploads; `--detach`
+survives a dropped login shell (needed for the 7.6 GB checkpoint). It reads the checkpoints
+in place, so the `chmod -R a-w` protection on them can stay on, and it re-verifies the
+published files against `checkpoints.sha256` afterwards.
+
+```
+scripts/publish.sh                 # show what would upload
+scripts/publish.sh --go            # both, private
+scripts/publish.sh --go --detach   # same, detached
+scripts/publish.sh --go lora       # adapter only
+```
+
+Visibility is set only at repo *creation*: re-running with `--public` will not flip an
+existing private repo (use `HfApi.update_repo_settings`).
+
+
 `HF_TOKEN` in `.env` has write scope (verified). Push with `huggingface_hub`; LFS is handled
 automatically. Suggested repo names: `dmnsjk/pi0-libero-spatial-lora` and, if published,
 `dmnsjk/pi0-libero-spatial-full`.
