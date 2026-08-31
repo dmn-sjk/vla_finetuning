@@ -155,6 +155,12 @@ def load_policy(args, device, stats_meta):
         cfg.pretrained_path = args.policy
         cfg.device = device.type
         cfg.dtype = "bfloat16" if args.bf16 else "float32"
+        # compile_model is a throughput setting, not a semantic one, and inheriting it turns
+        # on inductor max-autotune -- which shells out to nvcc and dies with
+        # "PermissionError: [Errno 13] Permission denied: 'nvcc'" on these nodes (job
+        # 3111066). Our own checkpoints ship compile_model=false, so forcing it off here also
+        # keeps every row of the comparison on the same execution path.
+        cfg.compile_model = False
     else:
         cfg = PI0Config(
             pretrained_path=args.policy,

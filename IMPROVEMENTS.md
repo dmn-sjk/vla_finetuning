@@ -130,16 +130,26 @@ Three caveats on those numbers:
 `lerobot/pi0_libero_finetuned_v044`'s `train_config.json` is public. Ours differs in five
 concrete ways, none of which we chose deliberately:
 
-| | lerobot v044 | openpi | **ours** |
-| --- | --- | --- | --- |
-| optimizer steps | 10,000 (+ continued from a prior run) | 30,000 | **1,314** (LoRA) / ~188 (full FT best) |
-| batch size | 32 | 32 | **256** effective |
-| weight decay | 0.01 | — | **0.0** |
-| Adam betas | (0.9, **0.95**) | — | (0.9, 0.999) default |
-| LR warmup | **8,000 steps**, cosine to 2.5e-6 | — | 50–200 steps |
-| peak LR | 2.5e-5 | — | 1e-4 (LoRA) / 2.5e-5 (full FT) |
-| EMA | not in config | **0.999** | none |
-| camera slots | 3 (2 real + 1 empty) | 3 | **2** |
+| | lerobot v044 | openpi | **our LoRA run** | **our full-FT run** |
+| --- | --- | --- | --- | --- |
+| optimizer steps | 10,000 (+ continued from a prior run) | 30,000 | **1,314** | **~188** (best was epoch 0) |
+| batch size | 32 | 32 | **256** effective | **256** effective |
+| weight decay | 0.01 | — | **0.0** | 0.01 ✓ |
+| Adam betas | (0.9, 0.95) | — | **(0.9, 0.999)** default | (0.9, 0.95) ✓ |
+| peak LR | 2.5e-5 | — | 1e-4 | 2.5e-5 ✓ |
+| LR warmup | **8,000 steps**, cosine to 2.5e-6 | — | 200 steps | **50 steps** |
+| EMA | not in config | **0.999** | none | none |
+| camera slots | 3 (2 real + 1 empty) | 3 | **2** | **2** |
+
+**Weight decay, betas and peak LR are already ruled out.** `train_pi0_fsdp.py` defaults to
+exactly the reference values (`--weight-decay 0.01`, `--betas 0.9 0.95`, `--lr 2.5e-5`), so
+the full-FT run had all three "right" and still landed at 56.6% — statistically tied
+(z = 0.76) with the LoRA run that had all three "wrong". Whatever is costing us 40 points, it
+is not these. Adopt them for consistency if convenient, but do not expect points.
+
+*(Do not read the `optimizer_*` fields in our checkpoints' `config.json` as evidence either
+way — those are lerobot preset defaults that get serialized regardless; both trainers build
+their own AdamW.)*
 
 ### We train with 2 camera slots; the reference setups use 3
 
@@ -161,7 +171,7 @@ Cheap to test properly: retrain with `empty_cameras=1`. Note that evaluating our
 checkpoints with 3 slots would not test this — it would just introduce a train/test mismatch
 they don't have. Fold it into item 3's run rather than spending a separate one.
 
-The two recipe items that stand out:
+The recipe items that actually stand out, then:
 
 - **Effective batch 256 vs 32.** At the same sample budget this costs us **8× fewer optimizer
   steps**. Combined with 4.3× less data, our LoRA run took 1,314 steps against openpi's
@@ -169,9 +179,7 @@ The two recipe items that stand out:
 - **Warmup of 8,000 steps** is longer than our entire training run. That only makes sense at
   their step counts, but it says our 50-step warmup is not a like-for-like choice.
 
-`weight_decay=0.01` and `betas=(0.9, 0.95)` are one-line changes worth adopting for
-consistency with the reference recipe, though neither is likely to be worth many points on its
-own.
+(`weight_decay` and `betas` are covered above — measured not to matter.)
 
 ---
 
