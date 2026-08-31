@@ -17,6 +17,7 @@ repeat.
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -62,12 +63,38 @@ def main():
 
     api = HfApi(token=token)
     api.create_repo(args.repo_id, private=args.private, exist_ok=True, repo_type="model")
+
+    # PEFT writes `"task_type": null` for a policy that is not one of its standard task types,
+    # and the Hub's config parser then shows on the model page:
+    #   Configuration Parsing Warning: In adapter_config.json: "peft.task_type" must be a string
+    # Dropping the key parses identically -- PeftConfig.from_pretrained yields the same
+    # LoraConfig with task_type=None either way -- so publish a copy without it. PEFT
+    # regenerates this file on every export, so the sanitising belongs here rather than
+    # only in the saved checkpoint.
+    ignore = ["README.md"]
+    sanitized = None
+    acfg = args.checkpoint / "adapter_config.json"
+    if acfg.is_file():
+        raw = json.loads(acfg.read_text())
+        if raw.get("task_type", "absent") is None:
+            raw.pop("task_type")
+            sanitized = (json.dumps(raw, indent=2, sort_keys=True) + "\n").encode()
+            ignore.append("adapter_config.json")
+            print("note: dropping null task_type from the uploaded adapter_config.json")
+
     api.upload_folder(
         folder_path=str(args.checkpoint),
         repo_id=args.repo_id,
         repo_type="model",
-        ignore_patterns=["README.md"],
+        ignore_patterns=ignore,
     )
+    if sanitized is not None:
+        api.upload_file(
+            path_or_fileobj=sanitized,
+            path_in_repo="adapter_config.json",
+            repo_id=args.repo_id,
+            repo_type="model",
+        )
     api.upload_file(
         path_or_fileobj=str(args.card),
         path_in_repo="README.md",

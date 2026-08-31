@@ -143,6 +143,14 @@ scripts/publish.sh --go lora       # adapter only
 Visibility is set only at repo *creation*: re-running with `--public` will not flip an
 existing private repo (use `HfApi.update_repo_settings`).
 
+**PEFT writes `"task_type": null`**, which makes the Hub model page show
+`Configuration Parsing Warning: In adapter_config.json: "peft.task_type" must be a string`.
+Dropping the key parses identically (`PeftConfig.from_pretrained` yields the same
+`LoraConfig` with `task_type=None` either way), so `publish_to_hub.py` strips it on upload.
+Do **not** "fix" it by setting a real `TaskType` string -- that changes which `PeftModel`
+subclass is constructed on load. PEFT regenerates this file on every export, so the check
+lives in the publisher, not only in the saved checkpoint.
+
 
 `HF_TOKEN` in `.env` has write scope (verified). Push with `huggingface_hub`; LFS is handled
 automatically. Suggested repo names: `dmnsjk/pi0-libero-spatial-lora` and, if published,
