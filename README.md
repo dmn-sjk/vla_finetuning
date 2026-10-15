@@ -4,12 +4,10 @@ End-to-end distributed training pipeline for fine-tuning a Vision-Language-Actio
 for robotic manipulation, built for a multi-GPU SLURM cluster. The model maps multi-camera
 visual input and a natural-language instruction to continuous robot control actions.
 
-The project is deliberately split into phases:
+The project is deliberately split into phases. Phase 1, a raw `torch.distributed` loop on a
+synthetic toy model, was removed once the repository was cut down to the code behind the
+published checkpoints; it remains in git history.
 
-- **Phase 1 — distributed systems foundation.** A native `torch.distributed` training loop:
-  NCCL process groups, `DistributedSampler` sharding, rank-gated I/O, gradient accumulation
-  with sync control, bf16, gradient checkpointing, and resumable checkpointing. *Implemented
-  and verified.*
 - **Phase 2 — multimodal scaling.** LoRA fine-tuning of **π0** (~4B: a PaliGemma backbone
   plus a flow-matching action expert) on the **LIBERO** manipulation benchmark via
   `lerobot` and `peft`. *Implemented and verified; this is the production recipe.*
@@ -22,37 +20,41 @@ The project is deliberately split into phases:
 ## Layout
 
 ```
-train.py               # Phase 1 entrypoint (world size 1 or N, unchanged)
-train_pi0.py           # Phase 2 entrypoint: pi0 + LoRA on LIBERO, native DDP
-train_pi0_fsdp.py      # Phase 2B entrypoint: pi0 full FT under FSDP, via accelerate
-src/dist_utils.py      # process group setup, rank gating, cross-rank reductions
-src/toy.py             # VLA-shaped synthetic data + small model (Phase 1)
-src/runtime.py         # native-library preloading (NPP) needed before torchcodec
-src/paths.py           # $VLA_ROOT / $VLA_RUNS resolution, shared with the shell
-scripts/verify_env.py  # checks the pieces that have historically broken here
-scripts/probe_pi0.py   # one pi0+LoRA forward/backward: batch keys, VRAM, param counts
-scripts/eval_adapter.py# seeded, repeated val loss for an adapter or a full checkpoint
-slurm/common.sh        # shared job prologue: paths, caches, .env, venv activation
-slurm/train.sbatch     # Phase 1: 8-GPU production job
-slurm/smoke.sbatch     # Phase 1: 1-GPU + 4-GPU + resume smoke test
-slurm/pi0_train.sbatch # Phase 2: 8-GPU production job
-slurm/pi0_smoke.sbatch # Phase 2: 1-GPU + resume + 4-GPU smoke test
-slurm/pi0_fsdp_preflight.sbatch # Phase 2B: 1-GPU checks on the fast queue
-slurm/pi0_fsdp_smoke.sbatch     # Phase 2B: 4-GPU FSDP + both resume paths
-slurm/pi0_fsdp_bench.sbatch     # Phase 2B: sharding memory/throughput sweep
-slurm/pi0_full_train.sbatch     # Phase 2B: full-FT convergence run
-slurm/pi0_fsdp_verify_export.sbatch  # reload an exported checkpoint and re-measure it
-slurm/pi0_compare_checkpoints.sbatch # LoRA vs full FT under one eval protocol
-TODO.md                # what is NOT done, in dependency order
-pyproject.toml         # dependencies + CUDA wheel index pins
-uv.lock                # exact pinned versions
+train_pi0.py                         # Phase 2 entrypoint: pi0 + LoRA on LIBERO, native DDP
+train_pi0_fsdp.py                    # Phase 2B entrypoint: pi0 full FT under FSDP, via accelerate
+src/dist_utils.py                    # process group setup, rank gating, cross-rank reductions
+src/runtime.py                       # native-library preloading (NPP) needed before torchcodec
+src/paths.py                         # $VLA_ROOT / $VLA_RUNS resolution, shared with the shell
+scripts/verify_env.py                # checks the pieces that have historically broken here
+scripts/eval_adapter.py              # seeded, repeated val loss for an adapter or a full checkpoint
+scripts/eval_libero.py               # closed-loop LIBERO rollouts: success rate, 10 tasks x 50 trials
+scripts/render_results.py            # success-rate tables for the model cards, from results/*.json
+scripts/publish.sh                   # publish both checkpoints to the Hub (dry run unless --go)
+scripts/publish_to_hub.py            # upload one checkpoint with its card from model_cards/
+slurm/common.sh                      # shared job prologue: paths, caches, .env, venv activation
+slurm/pi0_train.sbatch               # Phase 2: 8-GPU production job
+slurm/pi0_scaling.sbatch             # Phase 2: 1/2/4-GPU throughput at fixed effective batch
+slurm/pi0_fsdp_bench.sbatch          # Phase 2B: sharding memory/throughput sweep
+slurm/pi0_full_train.sbatch          # Phase 2B: full-FT convergence run
+slurm/pi0_compare_checkpoints.sbatch # base vs LoRA vs full FT val loss, one protocol
+slurm/pi0_libero_eval.sbatch         # base vs LoRA vs full FT success rate on LIBERO-spatial
+slurm/pi0_libero_reference.sbatch    # lerobot's own LIBERO-finetuned pi0 through our harness
+results/                             # per-episode rollout records behind the published success rates
+model_cards/                         # the Hub READMEs of both published checkpoints
+checkpoints.sha256                   # hashes of the archived checkpoints that were evaluated
+TODO.md                              # what is NOT done, in dependency order
+IMPROVEMENTS.md                      # the gap to published pi0 LIBERO numbers: causes, costs, order
+CLAUDE.md                            # detailed engineering notes
+md_files/PROJECT.md                  # original project brief
+pyproject.toml                       # dependencies + CUDA wheel index pins
+uv.lock                              # exact pinned versions
+constraints.txt                      # pins for installing the LIBERO simulator into the venv
 ```
 
-Each phase's entrypoint is kept rather than overwritten. Phase 1's `train.py` is its own
-deliverable — the native `torch.distributed` loop is the point of that phase — and Phase 2's
-`train_pi0.py` stays the verified production recipe. `train_pi0_fsdp.py` builds beside it and
-imports its dataset split, loaders and evaluation function, so a full-FT number and a LoRA
-number are measured on exactly the same held-out episodes.
+The Phase 2 and Phase 2B entrypoints sit side by side: `train_pi0.py` stays the verified
+production recipe, and `train_pi0_fsdp.py` builds beside it and imports its dataset split,
+loaders and evaluation function, so a full-FT number and a LoRA number are measured on exactly
+the same held-out episodes.
 
 ## Setup
 
@@ -103,8 +105,8 @@ job:
 | `CKPT_ROOT` | an archive on permanent storage, else `$VLA_RUNS` | where evaluation **reads** finished checkpoints from |
 | `NCCL_SOCKET_IFNAME` | `ib0` | network interface NCCL uses to set up multi-GPU communication |
 
-`CKPT_ROOT` is the one that is not just a path preference. The eval, sanity, diagnose and
-publish jobs only read from it — `$CKPT_ROOT/pi0_libero/adapter_best`,
+`CKPT_ROOT` is the one that is not just a path preference. The eval and publish jobs only
+read from it — `$CKPT_ROOT/pi0_libero/adapter_best`,
 `$CKPT_ROOT/pi0_full/model_best` — so pointing it at a write-protected copy on permanent
 storage keeps those runs reproducible after `$VLA_RUNS` is purged. It falls back to
 `$VLA_RUNS`, which is where a training job has just left them.
@@ -197,24 +199,9 @@ interactive shell too. As an alternative to `.env`,
 plain `python ...` commands below assume you have run `source slurm/common.sh` first, which
 activates the venv and exports `$VLA_RUNS`.
 
-### Phase 1 (synthetic model, distributed scaffolding)
-
-Smoke test — single GPU, 4 GPUs via `torchrun`, and checkpoint resume, in about two minutes:
-
-```bash
-sbatch slurm/smoke.sbatch
-```
-
-Full run on 8 GPUs:
-
-```bash
-sbatch slurm/train.sbatch
-```
-
 ### Phase 2 (π0 + LoRA on LIBERO)
 
 ```bash
-sbatch slurm/pi0_smoke.sbatch    # 1 GPU -> resume -> 4 GPU, ~10 min
 sbatch slurm/pi0_train.sbatch    # 8 GPUs, 7 epochs, ~70 min
 sbatch slurm/pi0_scaling.sbatch  # 1/2/4 GPU throughput at fixed effective batch
 ```
@@ -232,8 +219,6 @@ Publish `adapter_best/`, never `adapter/` — the latter is the final epoch, whi
 ### Phase 2B (π0 full fine-tuning, sharded with FSDP)
 
 ```bash
-sbatch slurm/pi0_fsdp_preflight.sbatch  # 1 GPU on the fast queue: everything but sharding
-sbatch slurm/pi0_fsdp_smoke.sbatch      # 4 GPUs: FSDP, resume, cross-world-size resume
 sbatch slurm/pi0_fsdp_bench.sbatch      # the memory/throughput sweep across strategies
 sbatch slurm/pi0_full_train.sbatch      # 8 GPUs, full FT to convergence
 ```
@@ -254,7 +239,8 @@ Iterating locally on one GPU, without SLURM:
 
 ```bash
 source slurm/common.sh      # venv + caches + .env, same as a job
-python train.py --epochs 3 --batch-size 32 --grad-checkpointing
+python train_pi0.py --max-steps 20 --val-episodes 2 --grad-checkpointing \
+  --out $VLA_RUNS/pi0_dev
 ```
 
 Startup logs the effective batch size (per-device × gradient accumulation × world size), which
@@ -389,10 +375,10 @@ and ordering. Nothing is blocked: the `$HOME`
 quota is clear and Phase 2B is committed. `CLAUDE.md` has the detailed engineering notes.
 
 **A — Simulator rollouts.** *Done*, see the success rates above. `scripts/eval_libero.py`
-runs the standard LIBERO protocol; `scripts/diagnose_libero.py` exists because the first
-attempt scored 0% on a known-good checkpoint (the post-processor was never given the
-dataset's normalization stats, so rollouts drove the arm with z-scores — a validation loss
-cannot catch that, because computing one never touches the inference path).
+runs the standard LIBERO protocol. The first attempt scored 0% on a known-good checkpoint
+(the post-processor was never given the dataset's normalization stats, so rollouts drove the
+arm with z-scores — a validation loss cannot catch that, because computing one never touches
+the inference path).
 
 **B — Full fine-tuning under FSDP.** *Done*, see `train_pi0_fsdp.py` above.
 

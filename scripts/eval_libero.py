@@ -174,13 +174,6 @@ def load_policy(args, device, stats_meta):
         from peft import PeftModel
 
         policy = PeftModel.from_pretrained(policy, str(args.adapter))
-        if args.merge_lora:
-            # Folding LoRA into the base weights skips the adapter's extra matmuls on every
-            # one of ~10^5 forward passes, but the merge happens in the load dtype: in
-            # bf16 it rounds, so the rolled-out weights are no longer bit-identical to the
-            # artefact being reported on. Off by default -- the number should describe the
-            # adapter as published, not a re-rounded copy of it.
-            policy = policy.merge_and_unload()
     policy.to(device).eval()
 
     norm = {
@@ -387,8 +380,6 @@ def main():
     p.add_argument("--checkpoint-stats", action="store_true",
                    help="use the normalization stats the checkpoint ships instead of --dataset's "
                         "(required for third-party checkpoints trained on another mix)")
-    p.add_argument("--merge-lora", action="store_true",
-                   help="fold the adapter into the base weights (faster, but rounds in bf16)")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--verify-obs", action="store_true")
     args = p.parse_args()

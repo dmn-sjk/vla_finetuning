@@ -1,11 +1,9 @@
 """Phase 2: LoRA fine-tuning of pi0 on LIBERO, native torch.distributed.
 
-Runs identically at world size 1 (`python train_pi0.py`) and under torchrun, exactly
-like Phase 1's train.py, and reuses the same distributed scaffolding in src/dist_utils.
-Phase 1 is kept intact rather than overwritten — the native DDP loop is its own
-deliverable, and this file is the "same skeleton, real model" counterpart.
+Runs identically at world size 1 (`python train_pi0.py`) and under torchrun, using the
+distributed scaffolding in src/dist_utils.
 
-What changes relative to Phase 1:
+What it does:
   - the model is pi0 (~4B) from lerobot, frozen except for LoRA adapters
   - batches come from LeRobotDataset and go through lerobot's processor pipeline
   - checkpoints save the *adapter*, not the base weights, since only the adapter trains

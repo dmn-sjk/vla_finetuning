@@ -15,55 +15,64 @@ to be load-bearing; OpenVLA-7B is not a `lerobot` policy and would need a separa
 
 ## Current state
 
-**Phase 1, Phase 2 (LoRA) and Phase 2B (full FT under FSDP) are all implemented, verified
-on the cluster and fully measured.** Outstanding work is in `TODO.md`; nothing below is
-in flight.
+**Phase 2 (LoRA) and Phase 2B (full FT under FSDP) are implemented, verified on the
+cluster, fully measured and published** (`dmnsjk/pi0-libero-spatial-lora`,
+`dmnsjk/pi0-libero-spatial-full`). Outstanding work is in `TODO.md` and `IMPROVEMENTS.md`;
+nothing below is in flight.
+
+The repository was cleaned down to the code that produced and evaluated the published
+checkpoints. Phase 1 (`train.py`, `src/toy.py`), the smoke/preflight jobs, `probe_pi0.py`,
+`diagnose_libero.py` and the recheck/sanity/diagnose/verify-export jobs were removed; all of
+them are in git history. Findings below that cite those tools are still valid. (Phase 1 was
+verified on Athena in job 2948190: 1 GPU, 4 GPUs via torchrun, and resume on both.)
 
 ```
-train.py               # Phase 1 loop: DDP, grad accum, bf16, checkpoint/resume, W&B
 train_pi0.py           # Phase 2 production: pi0 + LoRA, native DDP  <- the production recipe
 train_pi0_fsdp.py      # Phase 2B: pi0 full FT, accelerate + FSDP; also --finetune lora
 src/dist_utils.py      # process group setup, rank gating, count-weighted reductions
-src/toy.py             # VLA-shaped synthetic data + small model (Phase 1 only)
 src/runtime.py         # preload_npp() — must run before any torchcodec import
+src/paths.py           # $VLA_ROOT / $VLA_RUNS resolution, shared with the shell
 scripts/verify_env.py  # checks torch/torchvision/torchcodec/lerobot/peft on a compute node
-scripts/probe_pi0.py   # one pi0+LoRA forward/backward: batch keys, VRAM, param counts
 scripts/eval_adapter.py# seeded, repeated val loss for an adapter *or* a full checkpoint
-slurm/train.sbatch     # Phase 1: 8-GPU production job
-slurm/smoke.sbatch     # Phase 1: 1-GPU + 4-GPU + resume smoke test
+scripts/eval_libero.py # closed-loop LIBERO rollouts (success rate); --verify-obs
+scripts/render_results.py # card tables from results/*.json; --check re-derives every rate
+scripts/publish.sh     # publish both checkpoints to the Hub (dry run unless --go)
+scripts/publish_to_hub.py # upload one checkpoint with its card from model_cards/
+slurm/common.sh        # shared job prologue: paths, caches, .env, venv activation
 slurm/pi0_train.sbatch # Phase 2: 8-GPU LoRA production job
-slurm/pi0_smoke.sbatch # Phase 2: same three phases with pi0
-slurm/pi0_fsdp_preflight.sbatch # Phase 2B: everything testable on 1 GPU (fast queue)
-slurm/pi0_fsdp_smoke.sbatch     # Phase 2B: 4-GPU FSDP, resume, cross-world-size resume
+slurm/pi0_scaling.sbatch        # Phase 2: 1/2/4-GPU throughput at fixed effective batch
 slurm/pi0_fsdp_bench.sbatch     # Phase 2B: the sharding memory/throughput sweep
 slurm/pi0_full_train.sbatch     # Phase 2B: full-FT convergence run
-slurm/pi0_fsdp_verify_export.sbatch  # reload an exported checkpoint and re-measure it
-slurm/pi0_compare_checkpoints.sbatch # LoRA vs full FT, one script, one set of seeds
-TODO.md                # what is NOT done: blockers, publishing, evaluation gaps
+slurm/pi0_compare_checkpoints.sbatch # base vs LoRA vs full FT val loss, one protocol
+slurm/pi0_libero_eval.sbatch    # base vs LoRA vs full FT success rate, LIBERO-spatial
+slurm/pi0_libero_reference.sbatch # IMPROVEMENTS.md item 1: lerobot's LIBERO pi0, our harness
+results/               # per-episode rollout records behind the published success rates
+model_cards/           # Hub READMEs of both checkpoints, byte-identical to the Hub copies
+checkpoints.sha256     # hashes of the archived checkpoints that were evaluated
+TODO.md                # what is NOT done: evaluation gaps, housekeeping
+IMPROVEMENTS.md        # the gap to published pi0 LIBERO numbers: causes, costs, order
 pyproject.toml         # dependency declarations + CUDA index pins
 uv.lock                # exact pinned versions — commit this
+constraints.txt        # pins for installing the LIBERO sim stack into the venv
 ```
 
-`train.py` runs identically at world size 1 (`python train.py`) and under `torchrun`, so
-develop on 1 GPU and scale unchanged. Verified on Athena (job 2948190, on the current cu130
-stack): 1 GPU, 4 GPUs via torchrun, and resume-from-checkpoint on both. `effective_batch` is
-logged on startup.
+`train_pi0.py` runs identically at world size 1 (`python train_pi0.py`) and under
+`torchrun`, so develop on 1 GPU and scale unchanged: `src/dist_utils` scaffolding,
+`DistributedSampler`, `no_sync` on accumulation micro-batches, atomic checkpoints, and
+`effective_batch` logged on startup.
 
-`train_pi0.py` mirrors that structure with the real model: same `src/dist_utils` scaffolding,
-same sampler/no_sync/atomic-checkpoint discipline, but pi0 + LoRA and `LeRobotDataset`
-instead of `src/toy.py`.
-
-Run the relevant smoke test after any change to the distributed path:
-
-```bash
-sbatch slurm/smoke.sbatch           # Phase 1: 1 GPU + 4 GPU + resume, ~2 min
-sbatch slurm/pi0_smoke.sbatch       # Phase 2: same three phases with pi0
-sbatch slurm/pi0_fsdp_preflight.sbatch  # Phase 2B: 1 GPU on the fast queue, ~10 min
-sbatch slurm/pi0_fsdp_smoke.sbatch      # Phase 2B: 4-GPU FSDP + both resume paths
-```
-
-Run the preflight first: it catches everything that does not need more than one GPU on
-`plgrid-now`, which schedules in seconds and does not bill the main allocation.
+There are no smoke-test job scripts any more. After any change to the distributed path,
+re-check before a production run, as the removed jobs did. For `train_pi0.py`: 1 GPU, then
+resume from that checkpoint, then 4 GPUs via torchrun (resume *across a world-size change*).
+For `train_pi0_fsdp.py`, on 1 GPU: LoRA on the DDP path with save + export, resume, and the
+guard that refuses a single-process `--sharding full_shard`. Then on 4 GPUs: full FT under
+FULL_SHARD (the custom auto-wrap policy fires), resume at the same world size,
+SHARD_GRAD_OP + full-model export (the publishable artefact is written), LoRA under FSDP
+(mixed `requires_grad` inside a unit), and resume onto 2 GPUs (DCP reshards 4-rank shards).
+That last one uses LoRA, because full FT does not fit on two cards (job 2989671, below).
+FSDP itself has no single-GPU check: accelerate only engages it from a distributed launch.
+Do the single-GPU parts on `plgrid-now` first: it schedules in seconds, does not bill the
+main allocation, and catches everything that does not need more than one GPU.
 
 ### Prerequisite: gated PaliGemma repo
 
@@ -138,8 +147,8 @@ including resume *across a world-size change*).
 
   **Process lesson: changing `--lora-target` changes which parameters reach the DDP reducer,
   so it invalidates any prior smoke test.** Job 2948411 died on 8 GPUs because the smoke run
-  had used different targets. `slurm/pi0_smoke.sbatch` now pins the same
-  `--lora-target attention` as production; keep them in sync.
+  had used different targets. Any smoke run must pin the same `--lora-target attention`
+  as production.
 
 - **The full run is hours, not days.** ~52.5k train samples/epoch; 10 epochs on 8 GPUs is
   roughly 2 hours at the extrapolated rate. The 2-day wall clock in `pi0_train.sbatch` is a
@@ -256,9 +265,10 @@ Results worth not glossing over:
 **Four GPUs is the floor, not one.** Sharding across two ranks still does not fit: job
 2989671 resharded a checkpoint onto 2 ranks correctly and then OOM'd in the first step at
 35.4 GiB allocated, 2.94 GiB short of the card, at per-device batch *2*. At world size 4 the
-same configuration peaks at 25.1 GiB and trains. This is why `slurm/pi0_fsdp_smoke.sbatch`
-tests cross-world-size resume with LoRA rather than full FT — the resharding path is what
-that phase checks, and it must not double as an assertion that full FT fits on two cards.
+same configuration peaks at 25.1 GiB and trains. This is why the (removed)
+`pi0_fsdp_smoke.sbatch` tested cross-world-size resume with LoRA rather than full FT — the
+resharding path is what that phase checked, and it must not double as an assertion that full
+FT fits on two cards.
 
 ### pi0 breaks the textbook auto-wrap policy — this is the interesting part
 
@@ -339,13 +349,15 @@ assumed one.
 ### Reference point: what fine-tuning is worth at all
 
 Base `lerobot/pi0`, no fine-tuning, on the **production** 40-episode val split (job 2991110,
-3 seeds, with the `--repeats` fix below):
+3 seeds, with the `--repeats` fix below). The rows below come from different jobs;
+`slurm/pi0_compare_checkpoints.sbatch` has since been extended to measure all three in one
+job under one protocol (3 seeds, batch size 8), but that version has not been run yet:
 
 | checkpoint | val loss (40 val episodes) |
 | --- | --- |
 | base `lerobot/pi0` | **0.8719 +- 0.0048** |
 | LoRA `adapter_best` | 0.3343 +- 0.0015 |
-| full FT | measured by `slurm/pi0_full_train.sbatch` |
+| full FT `model_best` | 0.3350 +- 0.0014 (job 2991314; LoRA 0.3344 +- 0.0020 there) |
 
 Quote this whenever a fine-tuned number is quoted. Without it, "val loss 0.33" is
 uninterpretable — it is the drop from 0.87 that shows the training did something, and it is
@@ -366,11 +378,15 @@ Verified in job 2991045 by loading the exported directory fresh and re-evaluatin
 
 | | val loss (4 val episodes) |
 | --- | --- |
-| training log (smoke phase 3) | 0.6796 |
+| training log (phase 3 of the removed `pi0_fsdp_smoke.sbatch`) | 0.6796 |
 | reloaded export, seeds 0-1 | **0.6850 +- 0.0041** |
 
-Consistent to ~1.3 sigma, so the artefact is what it claims to be. Re-check with
-`sbatch slurm/pi0_fsdp_verify_export.sbatch <dir>` after any change to the export path.
+Consistent to ~1.3 sigma, so the artefact is what it claims to be. After any change to the
+export path, re-check the same way: load the exported directory fresh with
+`scripts/eval_adapter.py --policy <dir> --val-episodes <same as the run> --repeats N` and
+compare against the training log. The split must match the run that produced the
+checkpoint, or "validation" means a different set of episodes and the number is not
+comparable to anything (`eval_adapter.py` defaults to the production 40).
 
 **Caveat on that number:** a 4-episode val set (~490 frames) is far noisier than the
 40-episode set the LoRA results use. Seed 1234 gives 0.7116 on the same weights — 0.03
@@ -401,7 +417,7 @@ change and this fix has a meaningless spread. Re-measure before quoting one.
 - **accelerate silently ignores an FSDP plugin at world size 1** — the FSDP branch in
   `accelerate/state.py` sits inside the MULTI_GPU arm. A single-process `--sharding
   full_shard` would train unsharded and report a number that measures nothing, so the
-  script raises instead. Verified in the preflight.
+  script raises instead. Verified in the removed `pi0_fsdp_preflight.sbatch` (job 2989458).
 - **No `no_sync()` on accumulation micro-batches**, unlike `train_pi0.py`. FSDP's `no_sync`
   keeps *unsharded* gradients resident for the whole accumulation window, handing back
   exactly the memory sharding just saved.
@@ -445,6 +461,9 @@ builds the observation four ways, and scores each against a real dataset frame. 
 | **rot180** | **0.00599** | **0.01526** |
 
 An order of magnitude, on both cameras. Run `--verify-obs` again if the dataset ever changes.
+The same job's 4-episode smoke rollout ran base `lerobot/pi0` with `flipud` (set up before
+this measurement settled the orientation) and scored 0/4, which tells us nothing: base pi0
+scores 0% even with rot180 (0/500, job 3108565).
 
 ### The observation format is the dataset's, not lerobot's LiberoEnv default
 
@@ -473,7 +492,8 @@ suite's statistics; quietly substituting them would flatter any out-of-distribut
 
 `merge_and_unload()` would save the adapter's extra matmuls on ~10^5 forward passes, but the
 merge happens in the load dtype and in bf16 it rounds — the rolled-out weights would no
-longer be the artefact being reported on. `--merge-lora` opts in.
+longer be the artefact being reported on. Every published number uses the unmerged adapter
+(`PeftModel.from_pretrained`); the unused `--merge-lora` opt-in was removed.
 
 ### Success rates, measured (job 3108565)
 
@@ -526,9 +546,10 @@ instead of LIBERO's. Predicted actions reached the simulator as **z-scores** —
 too large on the rotation dims — so the arm flailed and nothing ever succeeded. Nothing
 raised.
 
-**The tell**, from `scripts/diagnose_libero.py`: predicted gripper `-1.08` where the expert
-commands `-1.0`. The dataset's action gripper stats are mean 0.084, std 0.996, and
-`(-1 - 0.084) / 0.996 = -1.088`. The output was in normalized units to three decimals.
+**The tell**, from the removed `scripts/diagnose_libero.py` (job 3108532): predicted gripper
+`-1.08` where the expert commands `-1.0`. The dataset's action gripper stats are mean 0.084,
+std 0.996, and `(-1 - 0.084) / 0.996 = -1.088`. The output was in normalized units to three
+decimals.
 
 **Why no earlier check could have caught it.** Training only ever calls `policy.forward()`
 (the flow-matching loss), and `scripts/eval_adapter.py` does the same. Neither touches the
@@ -555,9 +576,9 @@ checkpoint went 0/15 to 7/15.
 
 **Generalise this:** any metric computed with `policy.forward()` certifies the forward pass
 and nothing else. Before trusting a rollout harness, make it reproduce a policy already known
-to be good — `scripts/diagnose_libero.py` exists to do that in four isolated checks
+to be good. The removed `scripts/diagnose_libero.py` did that in four isolated checks
 (open-loop actions, state construction, image orientation, action convention), each of which
-can fail without the others noticing.
+can fail without the others noticing; rebuild it from git history if the harness changes.
 
 ### The dataset's own `meta/info.json` mislabels the state vector
 
@@ -569,6 +590,15 @@ range [2.497, 3.457], impossible for a quaternion component, and dims 6-7 are [0
 an env-built state matched a real dataset frame at **L2 0.0054** against a per-dim std of
 0.10-0.41. The `names` field is inherited boilerplate from the port template. Trust the
 stats, not the card.
+
+The action convention was checked from the dataset alone (check 4, job 3108532; no
+simulator involved): over one episode the recorded `action[:3]` correlates with the recorded
+next-frame change in end-effector position at **+0.92 / +0.97 / +0.98** (dx/dy/dz), slopes
+0.010 / 0.012 / 0.011, and the gripper action takes only the values -1 and 1. So the recorded
+actions behave as normalized OSC_POSE position deltas, which is what `env.step(action)`
+expects; a near-zero correlation would have meant absolute pose, joint space or a different
+scaling. The slope sits at ~0.01, not the controller's `output_max` of 0.05, so do not use
+0.05 as a unit conversion between action and metres.
 
 ### Installing the sim stack (the `egl-probe` wall)
 
@@ -844,7 +874,7 @@ Do **not** set `NCCL_IB_DISABLE=1` — IB is present and is the fast path. For `
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
 export MASTER_PORT=29500
 srun torchrun --nnodes=$SLURM_NNODES --nproc_per_node=8 \
-     --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT train.py
+     --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT train_pi0.py
 ```
 
 If rendezvous hangs on multi-node, resolve `MASTER_ADDR` to the node's `ib0` address instead
@@ -858,10 +888,10 @@ of its hostname — verify which network the hostname resolves to before assumin
   `if rank == 0` scattered everywhere.
 - **DistributedSampler.** Required for correct sharding, and `sampler.set_epoch(epoch)` must
   be called every epoch or every rank reproduces the same shuffle each epoch.
-- **Phase separation** (per `PROJECT.md`): Phase 1 is a raw `torch.distributed` loop
-  (`init_process_group(backend="nccl")`, manual DDP) to make the communication layer legible;
-  Phase 2 moves to Accelerate + `lerobot` + PEFT. Keep Phase 1 code intact when Phase 2 lands
-  — it is part of the deliverable, not scaffolding to delete.
+- **Phase separation** (per `PROJECT.md`): Phase 1 was a raw `torch.distributed` loop on a
+  toy model, there to make the communication layer legible; it was removed once the repo was
+  cut down to what produced the published checkpoints. `train_pi0.py` keeps that raw-DDP
+  structure with the real model; Phase 2B moves to Accelerate + FSDP.
 - Barrier before teardown and call `destroy_process_group()`, or jobs hang at exit and waste
   allocation.
 - Log effective batch size explicitly (per-device × grad accumulation × world size); it is
@@ -882,8 +912,9 @@ back up.
 
 ### A. Simulator rollouts — **done**, see "Closed-loop LIBERO evaluation" above
 
-`scripts/eval_libero.py` (+ `diagnose_libero.py`, `render_results.py`) and three sbatch
-scripts. Measured: base 0.0%, LoRA 54.2% +- 2.2, full FT 56.6% +- 2.2 over 500 episodes each.
+`scripts/eval_libero.py` (+ `render_results.py`) and `slurm/pi0_libero_eval.sbatch`; the
+debugging tools that found the post-processor bug were removed in the cleanup. Measured:
+base 0.0%, LoRA 54.2% +- 2.2, full FT 56.6% +- 2.2 over 500 episodes each.
 The original planning notes below proved accurate about the time sink — EGL and the install,
 not the policy code — and missed the one that actually cost a run: the post-processor.
 
@@ -912,7 +943,8 @@ if the portfolio's ML-results story matters more than its systems story.
 
 ### B. Full fine-tuning under FSDP — **done**, see the section above
 
-`train_pi0_fsdp.py` plus four sbatch scripts. Two notes carried forward from planning:
+`train_pi0_fsdp.py` plus `pi0_fsdp_bench.sbatch` and `pi0_full_train.sbatch` (the preflight
+and smoke jobs were removed in the cleanup). Two notes carried forward from planning:
 
 **There is no `configs/` directory, deliberately.** The sharding strategy is a CLI flag
 (`--sharding`) and the FSDP plugin is built in Python, because the auto-wrap policy pi0

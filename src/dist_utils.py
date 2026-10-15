@@ -1,7 +1,7 @@
-"""Distributed helpers for Phase 1.
+"""Distributed helpers shared by the training entrypoints.
 
 Everything here is a no-op when the script is launched without torchrun, so the
-same train.py runs on a laptop, on one A100, or on 8 via torchrun.
+same entrypoint runs on a laptop, on one A100, or on 8 via torchrun.
 """
 
 import os

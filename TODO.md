@@ -57,7 +57,8 @@ measured".
 The path there cost one wrong run and is worth not repeating: the post-processor was never
 given the dataset's stats, so rollouts drove the arm with z-scores and a good checkpoint
 scored 0/15. See `CLAUDE.md`, "A good validation loss does not mean the policy works".
-`scripts/diagnose_libero.py` is the tool that localised it.
+`scripts/diagnose_libero.py` is the tool that localised it (removed in the cleanup; it is in
+git history).
 
 ### 3a. No test split exists — still true, and still mostly fine
 

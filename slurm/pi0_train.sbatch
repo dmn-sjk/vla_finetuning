@@ -22,8 +22,8 @@ export NCCL_DEBUG=INFO             # drop to WARN once the run is stable
 # 16 x 2 x 8 = 256 — the batch size the pi0 paper trains at.
 #
 # Match dataloader workers to allocated cores, leaving headroom for the main proc.
-# LIBERO stores frames as PNGs, so decode is CPU-bound and workers matter more here
-# than they did in Phase 1 — this, not VRAM, is the likely bottleneck.
+# LIBERO stores frames as PNGs, so decode is CPU-bound and the worker count matters:
+# this, not VRAM, is the likely bottleneck.
 GPUS_PER_NODE=8
 WORKERS=$(( SLURM_CPUS_PER_TASK / GPUS_PER_NODE - 2 ))
 

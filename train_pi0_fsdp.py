@@ -17,8 +17,8 @@ where sharding becomes load-bearing:
 FSDP shards the last three across ranks. This script is the accelerate-launched
 counterpart of train_pi0.py: same dataset, same episode-level split, same evaluate(),
 imported from it rather than copied, so a full-FT number and a LoRA number are
-comparable. train_pi0.py is left byte-identical — it is the verified production LoRA
-recipe and its native-DDP loop is its own deliverable.
+comparable. train_pi0.py's native-DDP loop is not touched by this file — it stays the
+verified production LoRA recipe.
 
 `--finetune lora` runs LoRA *under FSDP* as well; it exists so the memory table has a
 like-for-like row, not to replace train_pi0.py, which is what produces the publishable
