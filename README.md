@@ -109,16 +109,15 @@ publish jobs only read from it — `$CKPT_ROOT/pi0_libero/adapter_best`,
 storage keeps those runs reproducible after `$VLA_RUNS` is purged. It falls back to
 `$VLA_RUNS`, which is where a training job has just left them.
 
-`#SBATCH` directives cannot expand variables, so no script carries an account: SLURM uses
-your default one. The partitions (`plgrid-gpu-a100`, and `plgrid-now` for the sub-hour
-jobs) are Athena's names and are literal. SLURM reads both from the environment, and an
-environment value **overrides** a `#SBATCH` line, so if you have several grants or run on
-another cluster, set them once and submit the scripts unchanged:
+No job script carries an account or a partition: `#SBATCH` directives cannot expand
+variables, so any name written there would be wrong everywhere else. SLURM reads both from
+the environment instead — set them once per shell and every script submits unchanged:
 
 ```bash
-export SBATCH_ACCOUNT=<your-grant>
-export SBATCH_PARTITION=<partition>
+export SBATCH_PARTITION=<gpu-partition>
+export SBATCH_ACCOUNT=<account>        # only if your default account is not the right one
 ```
+
 
 ### lerobot version is load-bearing
 

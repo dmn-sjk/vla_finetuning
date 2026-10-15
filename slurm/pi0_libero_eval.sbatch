@@ -1,8 +1,5 @@
 #!/bin/bash
 #SBATCH -J pi0-libero-eval
-# No -A: SLURM picks your default account. Override without editing this file:
-#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
-#SBATCH -p plgrid-gpu-a100
 #SBATCH --nodes=1
 # Four GPUs, not eight: rollouts are inference-only (~10 GiB/rank), so the binding
 # constraint is scheduling latency, not memory, and 4-GPU jobs start while 8-GPU ones wait
@@ -29,9 +26,9 @@ source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=29506
 
-CKPT_ROOT=${CKPT_ROOT:-${PLG_GROUPS_STORAGE:-}/plgguseby/dmns/vla}
-# Not everyone has that group storage: fall back to this user's own run root.
-[ -d "$CKPT_ROOT" ] || CKPT_ROOT=$VLA_RUNS
+# Finished checkpoints are read from where training left them; export CKPT_ROOT to
+# read an archived copy instead (see README -> Where things are configured).
+CKPT_ROOT=${CKPT_ROOT:-$VLA_RUNS}
 NGPU=4
 NSTEPS=${NSTEPS:-5}
 EPT=${EPT:-50}

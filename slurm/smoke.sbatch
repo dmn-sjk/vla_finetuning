@@ -1,8 +1,5 @@
 #!/bin/bash
 #SBATCH -J vla-smoke
-# No -A: SLURM picks your default account. Override without editing this file:
-#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
-#SBATCH -p plgrid-gpu-a100
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=1
@@ -15,7 +12,6 @@ source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ib0}
 
-# torchcodec (lerobot video decode) needs FFmpeg 7 shared libs; Athena has none,
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=29517
 OUT=$VLA_RUNS/smoke

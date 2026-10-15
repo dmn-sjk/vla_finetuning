@@ -1,8 +1,5 @@
 #!/bin/bash
 #SBATCH -J pi0-libero-ref
-# No -A: SLURM picks your default account. Override without editing this file:
-#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
-#SBATCH -p plgrid-gpu-a100
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=1
@@ -32,8 +29,8 @@ set -uo pipefail
 #   --dataset HuggingFaceVLA/libero : its training set, for the feature/task cross-checks.
 #                              Only meta files are fetched, not the 32.5 GiB of frames.
 #
-# READ-ONLY with respect to our checkpoints: nothing here touches
-# $PLG_GROUPS_STORAGE/plgguseby/dmns/vla. Weights download to $HF_HOME on $SCRATCH.
+# READ-ONLY with respect to our own checkpoints: nothing here touches $CKPT_ROOT.
+# The reference weights download to $HF_HOME like any other Hub model.
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 

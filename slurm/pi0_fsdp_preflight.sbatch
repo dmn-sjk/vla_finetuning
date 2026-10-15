@@ -1,8 +1,5 @@
 #!/bin/bash
 #SBATCH -J pi0-fsdp-pre
-# No -A: SLURM picks your default account. Override without editing this file:
-#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
-#SBATCH -p plgrid-now
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1

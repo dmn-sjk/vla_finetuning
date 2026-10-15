@@ -22,8 +22,8 @@
 # expand variables — but SLURM reads them from the environment, and an
 # environment value overrides the directive in the script:
 #
-#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100
-#   export SBATCH_PARTITION=plgrid-gpu-a100
+#   export SBATCH_ACCOUNT=<account>
+#   export SBATCH_PARTITION=<gpu-partition>
 
 VLA_REPO="${SLURM_SUBMIT_DIR:-$PWD}"
 cd "$VLA_REPO" || return 1

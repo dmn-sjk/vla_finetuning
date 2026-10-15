@@ -1,8 +1,5 @@
 #!/bin/bash
 #SBATCH -J pi0-compare
-# No -A: SLURM picks your default account. Override without editing this file:
-#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
-#SBATCH -p plgrid-now
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1
@@ -23,9 +20,6 @@ set -euo pipefail
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-# 3 seeds, not 5: a 40-episode eval takes ~5 min per seed on one GPU, and two checkpoints
-# x 5 seeds overruns plgrid-now's 1-hour QOS cap (job 2991308 was cancelled for this). The
-# base-model reference also used n=3, so the three numbers stay methodologically matched.
 COMMON="--val-episodes 40 --batch-size 8 --num-workers 6 --repeats 3"
 
 echo "=================== 1/2: LoRA adapter_best ==================="

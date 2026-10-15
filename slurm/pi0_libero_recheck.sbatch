@@ -1,8 +1,5 @@
 #!/bin/bash
 #SBATCH -J pi0-libero-recheck
-# No -A: SLURM picks your default account. Override without editing this file:
-#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
-#SBATCH -p plgrid-now
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1
@@ -23,9 +20,9 @@ set -uo pipefail
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-CKPT_ROOT=${CKPT_ROOT:-${PLG_GROUPS_STORAGE:-}/plgguseby/dmns/vla}
-# Not everyone has that group storage: fall back to this user's own run root.
-[ -d "$CKPT_ROOT" ] || CKPT_ROOT=$VLA_RUNS
+# Finished checkpoints are read from where training left them; export CKPT_ROOT to
+# read an archived copy instead (see README -> Where things are configured).
+CKPT_ROOT=${CKPT_ROOT:-$VLA_RUNS}
 ADAPTER="$CKPT_ROOT/pi0_libero/adapter_best"
 
 echo "################ gate 1: open loop, LoRA adapter_best ################"

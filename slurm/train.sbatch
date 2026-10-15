@@ -1,8 +1,5 @@
 #!/bin/bash
 #SBATCH -J vla-phase1
-# No -A: SLURM picks your default account. Override without editing this file:
-#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
-#SBATCH -p plgrid-gpu-a100
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:8
 #SBATCH --ntasks-per-node=1        # one task per node; torchrun spawns the ranks
@@ -14,12 +11,12 @@ set -euo pipefail
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-# eth0/eth1 are DOWN on Athena compute nodes; only ib* is up. Without this NCCL
-# can select a dead interface and hang until timeout — the classic "job holds
-# 8 GPUs and does nothing" failure. Do NOT set NCCL_IB_DISABLE=1: IB is the fast path.
+# On an InfiniBand cluster the ethernet interfaces are often down while only ib* is up.
+# Without this NCCL can select a dead interface and hang until timeout — the classic
+# "job holds 8 GPUs and does nothing" failure. Export NCCL_SOCKET_IFNAME if your fast
+# interface is named differently. Do NOT set NCCL_IB_DISABLE=1: IB is the fast path.
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ib0}
 
-# torchcodec (lerobot video decode) needs FFmpeg 7 shared libs; Athena has none,
 export NCCL_DEBUG=INFO             # drop to WARN once the run is stable
 
 # Match dataloader workers to allocated cores, leaving headroom for the main proc.

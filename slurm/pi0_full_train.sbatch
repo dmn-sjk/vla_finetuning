@@ -1,8 +1,5 @@
 #!/bin/bash
 #SBATCH -J pi0-full
-# No -A: SLURM picks your default account. Override without editing this file:
-#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
-#SBATCH -p plgrid-gpu-a100
 #SBATCH --nodes=1
 # Four GPUs, not eight, for two measured reasons. (a) Four is the floor: full FT OOMs on
 # 1 and on 2 (job 2990654), so this is the smallest allocation that runs, and on a

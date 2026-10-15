@@ -49,8 +49,7 @@ fi
 # Sources .env, resolves VLA_ROOT/VLA_RUNS and activates the venv. See slurm/common.sh.
 source "$REPO_ROOT/slurm/common.sh"
 
-CK="${CKPT_ROOT:-${PLG_GROUPS_STORAGE:-}/plgguseby/dmns/vla}"
-[[ -d "$CK" ]] || CK="$VLA_RUNS"   # not everyone has that group storage
+CK="${CKPT_ROOT:-$VLA_RUNS}"   # export CKPT_ROOT to publish from an archived copy
 HF_USER="${HF_USER:-dmnsjk}"
 
 declare -A CKPT=( [lora]="$CK/pi0_libero/adapter_best" [full]="$CK/pi0_full/model_best" )
@@ -88,7 +87,9 @@ if [[ $GO -eq 1 ]]; then
   echo "======== verifying published checkpoints are untouched ========"
   declare -A PREFIX=( [lora]="pi0_libero/adapter_best/" [full]="pi0_full/model_best/" )
   MANIFEST=$(mktemp); trap 'rm -f "$MANIFEST"' EXIT
-  for t in "${TARGETS[@]}"; do grep -F "  ${PREFIX[$t]}" "$REPO_ROOT/checkpoints.sha256"; done > "$MANIFEST"
+  for t in "${TARGETS[@]}"; do
+    grep -F "  ${PREFIX[$t]}" "$REPO_ROOT/checkpoints.sha256" || true
+  done > "$MANIFEST"
   if [[ ! -s "$MANIFEST" ]]; then
     echo "WARNING: no manifest entries matched; skipping verification" >&2
   else
