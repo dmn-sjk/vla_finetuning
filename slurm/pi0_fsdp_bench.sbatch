@@ -20,8 +20,6 @@ set -uo pipefail    # deliberately NOT -e: several rows are *expected* to OOM
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ib0}
-
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=29503
 

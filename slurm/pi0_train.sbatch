@@ -14,11 +14,6 @@ set -euo pipefail
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-# On an InfiniBand cluster the ethernet interfaces are often down while only ib* is up.
-# Without this NCCL can select a dead interface and hang until timeout — the classic
-# "job holds 8 GPUs and does nothing" failure. Export NCCL_SOCKET_IFNAME if your fast
-# interface is named differently. Do NOT set NCCL_IB_DISABLE=1: IB is the fast path.
-export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ib0}
 export NCCL_DEBUG=INFO             # drop to WARN once the run is stable
 
 # Measured on one A100-40GB (see CLAUDE.md): at per-device batch 8, peak VRAM is

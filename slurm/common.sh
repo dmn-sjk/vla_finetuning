@@ -14,6 +14,7 @@
 #                      $UV_PROJECT_ENVIRONMENT, $VIRTUAL_ENV, $VLA_ROOT/venvs/vla, ./.venv]
 #   VLA_RUNS           checkpoints and run outputs    [default: $VLA_ROOT/runs]
 #   VLA_FFMPEG_PREFIX  prefix holding FFmpeg 7 shared libs [default: $VLA_ROOT/ffmpeg]
+#   NCCL_SOCKET_IFNAME network interface NCCL bootstraps over [default: ib0]
 #
 # HF_HOME, TRITON_CACHE_DIR, WANDB_DIR, LIBERO_CONFIG_PATH and MUJOCO_GL are also
 # only defaulted, so an already-exported value wins.
@@ -48,6 +49,14 @@ export WANDB_DIR="${WANDB_DIR:-$VLA_ROOT/wandb}"
 export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_PATH:-$VLA_ROOT/libero_config}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTHONUNBUFFERED=1
+
+# NCCL's bootstrap (rank discovery, connection setup) runs over TCP on an interface
+# it picks itself, and it can pick one that is down or virtual — then a multi-GPU job
+# holds its GPUs and hangs until the NCCL timeout. Pin the interface. Tensor traffic
+# still goes over InfiniBand verbs or NVLink, so do NOT set NCCL_IB_DISABLE=1. On a
+# node without InfiniBand, export the name of an interface that is up (`ip -br link`).
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ib0}"
+
 mkdir -p "$VLA_RUNS" "$WANDB_DIR" logs results
 
 # torchcodec needs FFmpeg 7 shared libs. Where the system has none they come from a

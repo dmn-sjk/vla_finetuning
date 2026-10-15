@@ -101,7 +101,7 @@ job:
 | `VLA_FFMPEG_PREFIX` | `$VLA_ROOT/ffmpeg` | prefix holding the FFmpeg 7 shared libraries |
 | `HF_HOME`, `TRITON_CACHE_DIR`, `WANDB_DIR`, `LIBERO_CONFIG_PATH` | under `$VLA_ROOT` | caches |
 | `CKPT_ROOT` | an archive on permanent storage, else `$VLA_RUNS` | where evaluation **reads** finished checkpoints from |
-| `NCCL_SOCKET_IFNAME` | `ib0` | Athena's only live interface; change it on a cluster without InfiniBand |
+| `NCCL_SOCKET_IFNAME` | `ib0` | network interface NCCL uses to set up multi-GPU communication |
 
 `CKPT_ROOT` is the one that is not just a path preference. The eval, sanity, diagnose and
 publish jobs only read from it — `$CKPT_ROOT/pi0_libero/adapter_best`,
