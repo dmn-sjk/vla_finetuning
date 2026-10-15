@@ -20,6 +20,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 from src import dist_utils as D
+from src.paths import run_dir
 from src.toy import ToyTrajectoryDataset, ToyVLA
 
 
@@ -41,7 +42,7 @@ def parse_args():
     p.add_argument(
         "--out",
         type=Path,
-        default=Path(os.environ.get("SCRATCH", ".")) / "vla_finetuning/runs/phase1",
+        default=run_dir("phase1"),
     )
     p.add_argument("--resume", action="store_true", help="resume from out/last.pt if present")
     p.add_argument("--wandb", action="store_true")

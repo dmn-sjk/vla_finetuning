@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -J pi0-verify-export
-#SBATCH -A plgttaautopilot3-gpu-a100
+# No -A: SLURM picks your default account. Override without editing this file:
+#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
 #SBATCH -p plgrid-now
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
@@ -26,16 +27,7 @@ CKPT=${1:?usage: sbatch slurm/pi0_fsdp_verify_export.sbatch <model-dir-or-repo> 
 VAL_EPISODES=${2:-4}
 REPEATS=${3:-2}
 
-if [ -f "${SLURM_SUBMIT_DIR:-.}/.env" ]; then
-  set -a; . "${SLURM_SUBMIT_DIR:-.}/.env"; set +a
-fi
-
-export HF_HOME=$SCRATCH/vla_finetuning/hf
-export TRITON_CACHE_DIR=$SCRATCH/vla_finetuning/.triton
-export LD_LIBRARY_PATH=$SCRATCH/vla_finetuning/ffmpeg/lib:${LD_LIBRARY_PATH:-}
-
-source "$SCRATCH/vla_finetuning/venvs/vla/bin/activate"
-mkdir -p logs
+source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
 echo "verifying $CKPT"
 # May be a local directory or a Hub repo id (e.g. lerobot/pi0 as a control), so listing it

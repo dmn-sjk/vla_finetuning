@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -J pi0-fsdp-pre
-#SBATCH -A plgttaautopilot3-gpu-a100
+# No -A: SLURM picks your default account. Override without editing this file:
+#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
 #SBATCH -p plgrid-now
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
@@ -16,19 +17,9 @@ set -uo pipefail
 # fp32 model construction, the LR schedule, checkpoint save/resume, the export, and the
 # single-GPU OOM measurement that motivates the whole file.
 
-if [ -f "${SLURM_SUBMIT_DIR:-.}/.env" ]; then
-  set -a; . "${SLURM_SUBMIT_DIR:-.}/.env"; set +a
-fi
+source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-export HF_HOME=$SCRATCH/vla_finetuning/hf
-export TRITON_CACHE_DIR=$SCRATCH/vla_finetuning/.triton
-export WANDB_DIR=$SCRATCH/vla_finetuning/wandb
-export LD_LIBRARY_PATH=$SCRATCH/vla_finetuning/ffmpeg/lib:${LD_LIBRARY_PATH:-}
-
-source "$SCRATCH/vla_finetuning/venvs/vla/bin/activate"
-mkdir -p logs
-
-OUT=$SCRATCH/vla_finetuning/runs/pi0_fsdp_pre
+OUT=$VLA_RUNS/pi0_fsdp_pre
 rm -rf "$OUT" "$OUT-lora"
 COMMON="--dataset lerobot/libero_spatial_image --num-workers 6 --val-episodes 4 \
         --lr-warmup-steps 2 --grad-checkpointing"

@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -J pi0-compare
-#SBATCH -A plgttaautopilot3-gpu-a100
+# No -A: SLURM picks your default account. Override without editing this file:
+#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
 #SBATCH -p plgrid-now
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
@@ -20,16 +21,7 @@ set -euo pipefail
 #
 # Base pi0 is included as the reference: without it, "0.33" is a number with no scale.
 
-if [ -f "${SLURM_SUBMIT_DIR:-.}/.env" ]; then
-  set -a; . "${SLURM_SUBMIT_DIR:-.}/.env"; set +a
-fi
-
-export HF_HOME=$SCRATCH/vla_finetuning/hf
-export TRITON_CACHE_DIR=$SCRATCH/vla_finetuning/.triton
-export LD_LIBRARY_PATH=$SCRATCH/vla_finetuning/ffmpeg/lib:${LD_LIBRARY_PATH:-}
-
-source "$SCRATCH/vla_finetuning/venvs/vla/bin/activate"
-mkdir -p logs
+source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
 # 3 seeds, not 5: a 40-episode eval takes ~5 min per seed on one GPU, and two checkpoints
 # x 5 seeds overruns plgrid-now's 1-hour QOS cap (job 2991308 was cancelled for this). The
@@ -38,11 +30,11 @@ COMMON="--val-episodes 40 --batch-size 8 --num-workers 6 --repeats 3"
 
 echo "=================== 1/2: LoRA adapter_best ==================="
 python scripts/eval_adapter.py \
-  --adapter "$SCRATCH/vla_finetuning/runs/pi0_libero/adapter_best" $COMMON
+  --adapter "$VLA_RUNS/pi0_libero/adapter_best" $COMMON
 
 echo "=================== 2/2: full FT model_best ==================="
 python scripts/eval_adapter.py \
-  --policy "$SCRATCH/vla_finetuning/runs/pi0_full/model_best" $COMMON
+  --policy "$VLA_RUNS/pi0_full/model_best" $COMMON
 
 echo "=================== comparison ==================="
 echo "base pi0 reference (job 2991110): VAL_LOSS mean=0.8719 std=0.0048 n=3"

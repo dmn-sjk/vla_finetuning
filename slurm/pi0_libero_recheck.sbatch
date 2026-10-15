@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -J pi0-libero-recheck
-#SBATCH -A plgttaautopilot3-gpu-a100
+# No -A: SLURM picks your default account. Override without editing this file:
+#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
 #SBATCH -p plgrid-now
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
@@ -20,19 +21,11 @@ set -uo pipefail
 #      above zero here.
 # Only if both pass is the 1500-episode run worth submitting.
 
-cd "$SLURM_SUBMIT_DIR"
-[ -f .env ] && { set -a; . ./.env; set +a; }
+source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-export HF_HOME=$SCRATCH/vla_finetuning/hf
-export TRITON_CACHE_DIR=$SCRATCH/vla_finetuning/.triton
-export LD_LIBRARY_PATH=$SCRATCH/vla_finetuning/ffmpeg/lib:${LD_LIBRARY_PATH:-}
-export LIBERO_CONFIG_PATH=$SCRATCH/vla_finetuning/libero_config
-export MUJOCO_GL=egl
-export PYTHONUNBUFFERED=1
-
-source "$SCRATCH/vla_finetuning/venvs/vla/bin/activate"
-mkdir -p logs results
-CKPT_ROOT=${CKPT_ROOT:-$PLG_GROUPS_STORAGE/plgguseby/dmns/vla}
+CKPT_ROOT=${CKPT_ROOT:-${PLG_GROUPS_STORAGE:-}/plgguseby/dmns/vla}
+# Not everyone has that group storage: fall back to this user's own run root.
+[ -d "$CKPT_ROOT" ] || CKPT_ROOT=$VLA_RUNS
 ADAPTER="$CKPT_ROOT/pi0_libero/adapter_best"
 
 echo "################ gate 1: open loop, LoRA adapter_best ################"

@@ -16,7 +16,7 @@ Run on a compute node — the GPU checks need a real device:
         python scripts/verify_env.py
 """
 
-import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +24,7 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.paths import ffmpeg_prefix  # noqa: E402
 from src.runtime import preload_npp  # noqa: E402  (must precede torchcodec import)
 
 FAILURES: list[str] = []
@@ -83,10 +84,13 @@ def _tc():
     # Import alone is not proof: torchcodec probes several FFmpeg majors and only
     # fails when a decode is actually attempted. Encode a throwaway clip with the
     # same FFmpeg build we link against, then decode it.
-    ffmpeg = Path(os.environ.get("SCRATCH", "")) / "vla_finetuning/ffmpeg/bin/ffmpeg"
+    ffmpeg = ffmpeg_prefix() / "bin/ffmpeg"
     if not ffmpeg.exists():
-        print("    (no micromamba ffmpeg binary; skipped round-trip decode)")
-        return
+        system = shutil.which("ffmpeg")
+        if system is None:
+            print("    (no ffmpeg binary found; skipped round-trip decode)")
+            return
+        ffmpeg = Path(system)
     with tempfile.TemporaryDirectory() as td:
         clip = Path(td) / "clip.mp4"
         subprocess.run(

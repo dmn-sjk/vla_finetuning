@@ -11,7 +11,7 @@ is read-only -- which it should be, since these are the artefacts of runs nobody
 repeat.
 
     python scripts/publish_to_hub.py --dry-run \
-        --checkpoint $PLG_GROUPS_STORAGE/plgguseby/dmns/vla/pi0_libero/adapter_best \
+        --checkpoint $VLA_RUNS/pi0_libero/adapter_best \
         --card model_cards/pi0-libero-spatial-lora.md \
         --repo-id dmnsjk/pi0-libero-spatial-lora --private
 """

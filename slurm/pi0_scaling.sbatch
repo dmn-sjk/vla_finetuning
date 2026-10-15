@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -J pi0-scaling
-#SBATCH -A plgttaautopilot3-gpu-a100
+# No -A: SLURM picks your default account. Override without editing this file:
+#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
 #SBATCH -p plgrid-gpu-a100
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
@@ -22,22 +23,14 @@ set -euo pipefail
 # size, so every configuration does identical math on identical data and only the
 # parallelism changes. Same total samples per config => elapsed time is comparable.
 
-if [ -f "${SLURM_SUBMIT_DIR:-.}/.env" ]; then
-  set -a; . "${SLURM_SUBMIT_DIR:-.}/.env"; set +a
-fi
+source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-export HF_HOME=$SCRATCH/vla_finetuning/hf
-export TRITON_CACHE_DIR=$SCRATCH/vla_finetuning/.triton
-export NCCL_SOCKET_IFNAME=ib0
-export LD_LIBRARY_PATH=$SCRATCH/vla_finetuning/ffmpeg/lib:${LD_LIBRARY_PATH:-}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ib0}
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=29502
 
-source "$SCRATCH/vla_finetuning/venvs/vla/bin/activate"
-mkdir -p logs
-
-OUT=$SCRATCH/vla_finetuning/runs/pi0_scaling
+OUT=$VLA_RUNS/pi0_scaling
 BS=16
 STEPS=20          # optimizer steps, after 5 warmup steps that are excluded from timing
 EFFECTIVE=128     # held constant across every configuration below

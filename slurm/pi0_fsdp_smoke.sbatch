@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -J pi0-fsdp-smoke
-#SBATCH -A plgttaautopilot3-gpu-a100
+# No -A: SLURM picks your default account. Override without editing this file:
+#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
 #SBATCH -p plgrid-gpu-a100
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
@@ -35,23 +36,14 @@ set -euo pipefail
 # and full FT on one 40 GB card OOMs by design — that measurement lives in
 # slurm/pi0_fsdp_bench.sbatch.
 
-if [ -f "${SLURM_SUBMIT_DIR:-.}/.env" ]; then
-  set -a; . "${SLURM_SUBMIT_DIR:-.}/.env"; set +a
-fi
+source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-export HF_HOME=$SCRATCH/vla_finetuning/hf
-export TRITON_CACHE_DIR=$SCRATCH/vla_finetuning/.triton
-export WANDB_DIR=$SCRATCH/vla_finetuning/wandb
-export NCCL_SOCKET_IFNAME=ib0
-export LD_LIBRARY_PATH=$SCRATCH/vla_finetuning/ffmpeg/lib:${LD_LIBRARY_PATH:-}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ib0}
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=29502
 
-source "$SCRATCH/vla_finetuning/venvs/vla/bin/activate"
-mkdir -p logs
-
-OUT=$SCRATCH/vla_finetuning/runs/pi0_fsdp_smoke
+OUT=$VLA_RUNS/pi0_fsdp_smoke
 rm -rf "$OUT" "$OUT-zero2" "$OUT-lora"
 COMMON="--dataset lerobot/libero_spatial_image --batch-size 2 --num-workers 6 \
         --val-episodes 4 --grad-checkpointing --lr-warmup-steps 2"

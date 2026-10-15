@@ -70,6 +70,7 @@ from lerobot.policies.factory import make_policy, make_pre_post_processors  # no
 from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
 
 from src import dist_utils as D  # noqa: E402
+from src.paths import run_dir  # noqa: E402
 
 # Matched by class *name* rather than by class object: no import from transformers'
 # private module layout, and the policy stays readable in a log line. See the module
@@ -120,7 +121,7 @@ def parse_args():
     p.add_argument("--reduce-dtype", choices=("fp32", "bf16"), default="fp32")
     p.add_argument(
         "--out", type=Path,
-        default=Path(os.environ.get("SCRATCH", ".")) / "vla_finetuning/runs/pi0_full",
+        default=run_dir("pi0_full"),
     )
     p.add_argument("--resume", action="store_true")
     p.add_argument("--wandb", action="store_true")

@@ -658,22 +658,32 @@ accept jobs at all**. Only code lives in home; everything that grows lives on `$
 grouped under one project directory:
 
 ```
-$SCRATCH/vla_finetuning/
-├── hf/            # HF_HOME — models + datasets
-├── runs/          # checkpoints (train.py --out default)
-├── wandb/         # WANDB_DIR
-├── .triton/       # TRITON_CACHE_DIR
-├── ffmpeg/        # micromamba prefix, see below
-└── venvs/vla/     # UV_PROJECT_ENVIRONMENT
+$VLA_ROOT/            # = ./work in the repo by default; on Athena export it to
+                      # $SCRATCH/vla_finetuning, which is what the numbers below assume
+├── hf/               # HF_HOME — models + datasets
+├── runs/             # VLA_RUNS — checkpoints (every entrypoint's --out default)
+├── wandb/            # WANDB_DIR
+├── .triton/          # TRITON_CACHE_DIR
+├── libero_config/    # LIBERO_CONFIG_PATH
+├── ffmpeg/           # VLA_FFMPEG_PREFIX — micromamba prefix, see below
+└── venvs/vla/        # VLA_VENV / UV_PROJECT_ENVIRONMENT
 ```
 
-`slurm/*.sbatch` export all of these. Outside a job, set them yourself:
+One file resolves all of it: **`slurm/common.sh`**, which every `slurm/*.sbatch` sources as
+its first statement (`source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"`). It sources `.env`,
+defaults every variable above off `$VLA_ROOT`, puts FFmpeg on `LD_LIBRARY_PATH`, and
+activates the venv — so no job script contains a hardcoded path, and a different site or a
+different filesystem only needs `export VLA_ROOT=...`. Each value is only *defaulted*, so
+an exported one wins.
+
+Outside a job, do exactly what a job does:
 
 ```bash
-export HF_HOME=$SCRATCH/vla_finetuning/hf
-export TRITON_CACHE_DIR=$SCRATCH/vla_finetuning/.triton
-export WANDB_DIR=$SCRATCH/vla_finetuning/wandb
+source slurm/common.sh
 ```
+
+`src/paths.py` mirrors the same resolution for Python (`run_dir()`, `ffmpeg_prefix()`), so
+an entrypoint launched with nothing exported still writes to the same place.
 
 `$SCRATCH/.uv-cache` deliberately stays outside the project dir — it is a shared package
 cache, not project data. Note `$SCRATCH` is *temporary* storage subject to purging; the
@@ -691,7 +701,8 @@ and `uv.lock` is the reproducibility guarantee**. Recreate the environment anywh
 
 ```bash
 export UV_CACHE_DIR=$SCRATCH/.uv-cache
-export UV_PROJECT_ENVIRONMENT=$SCRATCH/vla_finetuning/venvs/vla   # NOT $HOME (10 GB quota)
+export VLA_ROOT=$SCRATCH/vla_finetuning           # default is ./work, in the 10 GB home
+export UV_PROJECT_ENVIRONMENT=$VLA_ROOT/venvs/vla
 uv sync
 ```
 

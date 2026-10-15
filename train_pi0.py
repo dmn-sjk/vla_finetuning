@@ -39,6 +39,7 @@ from lerobot.policies.factory import make_policy, make_pre_post_processors  # no
 from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
 
 from src import dist_utils as D  # noqa: E402
+from src.paths import run_dir  # noqa: E402
 
 
 # pi0's Linear modules fall into four groups (names dumped from the loaded model):
@@ -99,7 +100,7 @@ def parse_args():
     p.add_argument(
         "--out",
         type=Path,
-        default=Path(os.environ.get("SCRATCH", ".")) / "vla_finetuning/runs/pi0_libero",
+        default=run_dir("pi0_libero"),
     )
     p.add_argument("--resume", action="store_true", help="resume from out/last.pt if present")
     p.add_argument("--wandb", action="store_true")

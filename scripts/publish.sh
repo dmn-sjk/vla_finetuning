@@ -46,11 +46,11 @@ if [[ $DETACH -eq 1 ]]; then
   exit 0
 fi
 
-[[ -f .env ]] && { set -a; . ./.env; set +a; }
-export HF_HOME="${HF_HOME:-$SCRATCH/vla_finetuning/hf}"
-[[ -z "${VIRTUAL_ENV:-}" ]] && source "$SCRATCH/vla_finetuning/venvs/vla/bin/activate"
+# Sources .env, resolves VLA_ROOT/VLA_RUNS and activates the venv. See slurm/common.sh.
+source "$REPO_ROOT/slurm/common.sh"
 
-CK="${CKPT_ROOT:-$PLG_GROUPS_STORAGE/plgguseby/dmns/vla}"
+CK="${CKPT_ROOT:-${PLG_GROUPS_STORAGE:-}/plgguseby/dmns/vla}"
+[[ -d "$CK" ]] || CK="$VLA_RUNS"   # not everyone has that group storage
 HF_USER="${HF_USER:-dmnsjk}"
 
 declare -A CKPT=( [lora]="$CK/pi0_libero/adapter_best" [full]="$CK/pi0_full/model_best" )

@@ -15,21 +15,9 @@ The project is deliberately split into phases:
   `lerobot` and `peft`. *Implemented and verified; this is the production recipe.*
 - **Phase 2B — sharded full fine-tuning.** All 4.03B parameters trainable, sharded with
   **FSDP** through `accelerate` (ZeRO-2 and ZeRO-3 equivalents). Full FT needs ~64 GiB before
-  activations and OOMs a 40 GB card outright, which is what makes sharding load-bearing here
-  rather than decorative. *Implemented and measured.*
+  activations. *Implemented and measured.*
 
-π0 is used in place of the OpenVLA-7B / SmolVLA named in the original brief. It is the
-architecture the field converged on and is a first-class `lerobot` policy, so it reuses the
-dataset pipeline directly; SmolVLA at 450M is too small for sharding to be load-bearing, and
-OpenVLA-7B is not a `lerobot` policy and would need a separate RLDS data path. LIBERO is the
-benchmark π0 and OpenVLA both report against, which keeps our numbers comparable.
-
-`train.py` runs identically at world size 1 and under `torchrun`, so the distributed code path
-is developed on a single GPU and scaled without changes.
-
-Developed on **Athena** (Cyfronet / PLGrid): 8× NVIDIA A100-SXM4-**40 GB** per node,
-InfiniBand, SLURM. The 40 GB card is the binding constraint and is why LoRA is required rather
-than optional — see `CLAUDE.md` for the full engineering notes.
+`lerobot`'s implementation of π0 is used. π0 is finetuned on **LIBERO** manipulation benchmark.
 
 ## Layout
 
@@ -40,9 +28,11 @@ train_pi0_fsdp.py      # Phase 2B entrypoint: pi0 full FT under FSDP, via accele
 src/dist_utils.py      # process group setup, rank gating, cross-rank reductions
 src/toy.py             # VLA-shaped synthetic data + small model (Phase 1)
 src/runtime.py         # native-library preloading (NPP) needed before torchcodec
+src/paths.py           # $VLA_ROOT / $VLA_RUNS resolution, shared with the shell
 scripts/verify_env.py  # checks the pieces that have historically broken here
 scripts/probe_pi0.py   # one pi0+LoRA forward/backward: batch keys, VRAM, param counts
 scripts/eval_adapter.py# seeded, repeated val loss for an adapter or a full checkpoint
+slurm/common.sh        # shared job prologue: paths, caches, .env, venv activation
 slurm/train.sbatch     # Phase 1: 8-GPU production job
 slurm/smoke.sbatch     # Phase 1: 1-GPU + 4-GPU + resume smoke test
 slurm/pi0_train.sbatch # Phase 2: 8-GPU production job
@@ -68,26 +58,66 @@ number are measured on exactly the same held-out episodes.
 
 Requires [uv](https://docs.astral.sh/uv/). Dependencies are pinned in `uv.lock`.
 
+Everything lives under one directory, `$VLA_ROOT` — the virtualenv, the HF and Triton
+caches, the FFmpeg prefix and all run outputs. It defaults to `work/` inside the repository
+(gitignored), so a fresh clone needs nothing exported:
+
 ```bash
-export UV_CACHE_DIR=$SCRATCH/.uv-cache
-export UV_PROJECT_ENVIRONMENT=$SCRATCH/vla_finetuning/venvs/vla
+uv sync                      # creates ./.venv, which the job scripts find on their own
+```
+
+To keep the venv, the caches and the run outputs somewhere else, export `VLA_ROOT` and everything follows it:
+
+```bash
+export VLA_ROOT=/path/to/work
+export UV_PROJECT_ENVIRONMENT=$VLA_ROOT/venvs/vla
 uv sync
 ```
 
-`UV_PROJECT_ENVIRONMENT` keeps the virtualenv off the (small) home quota. On a machine without
-that constraint you can omit it and use the default `.venv/`.
+See [Where things are configured](#where-things-are-configured) below for the full resolution order.
 
-The CUDA wheel index is pinned to **cu128** in `pyproject.toml`, and `torch`, `torchvision`
-and `torchcodec` must all come from that same index — a PyPI `torchvision` against an index
-`torch` fails at import with `operator torchvision::nms does not exist`. Do not install torch
-with `--torch-backend=auto` on a machine whose GPU driver is not visible (e.g. a cluster login
-node) — it silently resolves to the CPU build.
-
-After setup, verify the pieces that actually break here:
+After setup, verify if the pieces actually work here. Run it on a compute node:
 
 ```bash
-srun -p plgrid-gpu-a100 -A <account> --gres=gpu:1 -t 00:10:00 \
-  python scripts/verify_env.py
+source slurm/common.sh        # venv + caches + .env; no manual activation needed
+python scripts/verify_env.py
+```
+
+### Where things are configured
+
+Every job script starts with one line — `source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"` —
+and that file resolves the whole environment: it sources `.env`, exports the cache
+locations, puts FFmpeg on the library path, and activates the virtualenv.
+
+Each variable is only *defaulted*, so an exported value always wins. `sbatch` propagates
+the submitting environment, so exporting one in your shell (or `~/.bashrc`) changes every
+job:
+
+| Variable | Default | What it controls |
+| --- | --- | --- |
+| `VLA_ROOT` | `work/` in the repository | work root for everything below |
+| `VLA_VENV` | first of `$UV_PROJECT_ENVIRONMENT`, `$VIRTUAL_ENV`, `$VLA_ROOT/venvs/vla`, `./.venv` that exists | the virtualenv jobs activate |
+| `VLA_RUNS` | `$VLA_ROOT/runs` | where training **writes** checkpoints (the entrypoints' default `--out`) |
+| `VLA_FFMPEG_PREFIX` | `$VLA_ROOT/ffmpeg` | prefix holding the FFmpeg 7 shared libraries |
+| `HF_HOME`, `TRITON_CACHE_DIR`, `WANDB_DIR`, `LIBERO_CONFIG_PATH` | under `$VLA_ROOT` | caches |
+| `CKPT_ROOT` | an archive on permanent storage, else `$VLA_RUNS` | where evaluation **reads** finished checkpoints from |
+| `NCCL_SOCKET_IFNAME` | `ib0` | Athena's only live interface; change it on a cluster without InfiniBand |
+
+`CKPT_ROOT` is the one that is not just a path preference. The eval, sanity, diagnose and
+publish jobs only read from it — `$CKPT_ROOT/pi0_libero/adapter_best`,
+`$CKPT_ROOT/pi0_full/model_best` — so pointing it at a write-protected copy on permanent
+storage keeps those runs reproducible after `$VLA_RUNS` is purged. It falls back to
+`$VLA_RUNS`, which is where a training job has just left them.
+
+`#SBATCH` directives cannot expand variables, so no script carries an account: SLURM uses
+your default one. The partitions (`plgrid-gpu-a100`, and `plgrid-now` for the sub-hour
+jobs) are Athena's names and are literal. SLURM reads both from the environment, and an
+environment value **overrides** a `#SBATCH` line, so if you have several grants or run on
+another cluster, set them once and submit the scripts unchanged:
+
+```bash
+export SBATCH_ACCOUNT=<your-grant>
+export SBATCH_PARTITION=<partition>
 ```
 
 ### lerobot version is load-bearing
@@ -117,14 +147,15 @@ directory:
 
 ```bash
 curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj bin/micromamba
-./bin/micromamba -r $SCRATCH/.mamba create -y -p $SCRATCH/vla_finetuning/ffmpeg \
+./bin/micromamba -r $VLA_ROOT/.mamba create -y -p $VLA_ROOT/ffmpeg \
   -c conda-forge "ffmpeg=7.*"
 ```
 
-Jobs put it on the library path (the SLURM scripts already do this):
+Jobs put it on the library path (`slurm/common.sh` already does this, and skips it when the
+system provides FFmpeg 7):
 
 ```bash
-export LD_LIBRARY_PATH=$SCRATCH/vla_finetuning/ffmpeg/lib:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$VLA_FFMPEG_PREFIX/lib:${LD_LIBRARY_PATH:-}
 ```
 
 Without it, `import torchcodec` fails and dataset loading dies at the first video frame. If
@@ -157,18 +188,15 @@ chmod 600 .env
 | `WANDB_API_KEY` | optional | Training telemetry. Can be omitted if `~/.netrc` already holds W&B credentials, or if you run without `--wandb`. |
 
 `python-dotenv` is not a dependency, so nothing loads `.env` implicitly — the shell sources
-it. `slurm/*.sbatch` do this already:
-
-```bash
-if [ -f "${SLURM_SUBMIT_DIR:-.}/.env" ]; then
-  set -a; . "${SLURM_SUBMIT_DIR:-.}/.env"; set +a
-fi
-```
-
-Running outside SLURM, source it the same way before launching. As an alternative to `.env`,
+it. `slurm/common.sh` does this for every job, and `source slurm/common.sh` does it for an
+interactive shell too. As an alternative to `.env`,
 `hf auth login` stores the token under `$HF_HOME` instead, outside the repository.
 
 ## Running
+
+`sbatch` needs nothing prepared — the job script sources `slurm/common.sh` itself. The
+plain `python ...` commands below assume you have run `source slurm/common.sh` first, which
+activates the venv and exports `$VLA_RUNS`.
 
 ### Phase 1 (synthetic model, distributed scaffolding)
 
@@ -196,7 +224,7 @@ Evaluate a saved adapter. **Always pass `--repeats`**: π0 is a flow-matching mo
 validation loss is a stochastic estimate and a single number is misleading.
 
 ```bash
-python scripts/eval_adapter.py --adapter $SCRATCH/vla_finetuning/runs/pi0_libero/adapter_best \
+python scripts/eval_adapter.py --adapter $VLA_RUNS/pi0_libero/adapter_best \
   --repeats 5
 ```
 
@@ -216,7 +244,7 @@ full_shard` (the last three are ZeRO-0/2/3 under their torch names). The exporte
 is a complete π0 policy directory, so it evaluates through the same script as the adapter:
 
 ```bash
-python scripts/eval_adapter.py --policy $SCRATCH/vla_finetuning/runs/pi0_full/model_best \
+python scripts/eval_adapter.py --policy $VLA_RUNS/pi0_full/model_best \
   --repeats 5
 ```
 
@@ -226,8 +254,8 @@ measurable and to give the LoRA result something to be compared against — see 
 Iterating locally on one GPU, without SLURM:
 
 ```bash
-$SCRATCH/vla_finetuning/venvs/vla/bin/python train.py \
-  --epochs 3 --batch-size 32 --grad-checkpointing
+source slurm/common.sh      # venv + caches + .env, same as a job
+python train.py --epochs 3 --batch-size 32 --grad-checkpointing
 ```
 
 Startup logs the effective batch size (per-device × gradient accumulation × world size), which

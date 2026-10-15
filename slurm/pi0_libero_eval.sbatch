@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -J pi0-libero-eval
-#SBATCH -A plgttaautopilot3-gpu-a100
+# No -A: SLURM picks your default account. Override without editing this file:
+#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
 #SBATCH -p plgrid-gpu-a100
 #SBATCH --nodes=1
 # Four GPUs, not eight: rollouts are inference-only (~10 GiB/rank), so the binding
@@ -23,22 +24,14 @@ set -uo pipefail
 # here is the honest zero-shot floor our fine-tuning has to beat, and quoting the paper's
 # number as "the baseline" would be wrong.
 
-cd "$SLURM_SUBMIT_DIR"
-[ -f .env ] && { set -a; . ./.env; set +a; }
+source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-export HF_HOME=$SCRATCH/vla_finetuning/hf
-export TRITON_CACHE_DIR=$SCRATCH/vla_finetuning/.triton
-export LD_LIBRARY_PATH=$SCRATCH/vla_finetuning/ffmpeg/lib:${LD_LIBRARY_PATH:-}
-export LIBERO_CONFIG_PATH=$SCRATCH/vla_finetuning/libero_config
-export MUJOCO_GL=egl
-export PYTHONUNBUFFERED=1
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=29506
 
-source "$SCRATCH/vla_finetuning/venvs/vla/bin/activate"
-mkdir -p logs results
-
-CKPT_ROOT=${CKPT_ROOT:-$PLG_GROUPS_STORAGE/plgguseby/dmns/vla}
+CKPT_ROOT=${CKPT_ROOT:-${PLG_GROUPS_STORAGE:-}/plgguseby/dmns/vla}
+# Not everyone has that group storage: fall back to this user's own run root.
+[ -d "$CKPT_ROOT" ] || CKPT_ROOT=$VLA_RUNS
 NGPU=4
 NSTEPS=${NSTEPS:-5}
 EPT=${EPT:-50}

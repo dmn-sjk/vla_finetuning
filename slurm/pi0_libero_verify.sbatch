@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -J pi0-libero-verify
-#SBATCH -A plgttaautopilot3-gpu-a100
+# No -A: SLURM picks your default account. Override without editing this file:
+#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
 #SBATCH -p plgrid-now
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
@@ -24,18 +25,7 @@ set -uo pipefail
 # Then a 4-episode rollout on the *base* policy to prove the loop closes and to measure
 # seconds/episode, which is what sizes the full run.
 
-cd "$SLURM_SUBMIT_DIR"
-[ -f .env ] && { set -a; . ./.env; set +a; }
-
-export HF_HOME=$SCRATCH/vla_finetuning/hf
-export TRITON_CACHE_DIR=$SCRATCH/vla_finetuning/.triton
-export LD_LIBRARY_PATH=$SCRATCH/vla_finetuning/ffmpeg/lib:${LD_LIBRARY_PATH:-}
-export LIBERO_CONFIG_PATH=$SCRATCH/vla_finetuning/libero_config
-export MUJOCO_GL=egl
-export PYTHONUNBUFFERED=1
-
-source "$SCRATCH/vla_finetuning/venvs/vla/bin/activate"
-mkdir -p logs results
+source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
 echo "############ 1. renderer + camera orientation ############"
 python scripts/eval_libero.py --verify-obs

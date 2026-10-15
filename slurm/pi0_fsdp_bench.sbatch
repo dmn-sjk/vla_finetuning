@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -J pi0-fsdp-bench
-#SBATCH -A plgttaautopilot3-gpu-a100
+# No -A: SLURM picks your default account. Override without editing this file:
+#   export SBATCH_ACCOUNT=<your-grant>-gpu-a100   (an env value beats a #SBATCH line)
 #SBATCH -p plgrid-gpu-a100
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:8
@@ -20,23 +21,14 @@ set -uo pipefail    # deliberately NOT -e: several rows are *expected* to OOM
 # "runs", once the 4.03B parameters are all trainable and AdamW needs fp32 moments for
 # every one of them (~64 GiB before activations).
 
-if [ -f "${SLURM_SUBMIT_DIR:-.}/.env" ]; then
-  set -a; . "${SLURM_SUBMIT_DIR:-.}/.env"; set +a
-fi
+source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-export HF_HOME=$SCRATCH/vla_finetuning/hf
-export TRITON_CACHE_DIR=$SCRATCH/vla_finetuning/.triton
-export WANDB_DIR=$SCRATCH/vla_finetuning/wandb
-export NCCL_SOCKET_IFNAME=ib0
-export LD_LIBRARY_PATH=$SCRATCH/vla_finetuning/ffmpeg/lib:${LD_LIBRARY_PATH:-}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ib0}
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=29503
 
-source "$SCRATCH/vla_finetuning/venvs/vla/bin/activate"
-mkdir -p logs
-
-OUT=$SCRATCH/vla_finetuning/runs/pi0_fsdp_bench
+OUT=$VLA_RUNS/pi0_fsdp_bench
 rm -rf "$OUT"
 # --val-episodes 4 keeps the end-of-run validation pass short; --no-export and
 # --no-checkpoint skip writing multi-GiB files nobody will load. None of the three touch
