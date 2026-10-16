@@ -2,10 +2,13 @@
 #
 # `hf-libero` drags in robosuite/robomimic/mujoco, an ecosystem old enough that its
 # resolver will happily downgrade numpy or pull a PyPI (CPU) torch over the cu128 one.
-# Passing this with `uv pip install -c constraints.txt` makes the install 49 pure
-# additions: nothing removed, nothing downgraded. Verify with a `uv pip freeze` diff.
+# Passing this with `uv pip install -c constraints.txt` keeps the install additive:
+# nothing already present is removed or downgraded. Verify with a `uv pip freeze` diff.
+# (robosuite's GUI `opencv-python` is the one exception, and is uninstalled again on
+# purpose -- it clobbers the headless cv2. See the README.)
 #
-# See CLAUDE.md, "Installing the sim stack (the egl-probe wall)".
+# See README, "Simulator, for evaluation only" for the recipe; CLAUDE.md,
+# "Installing the sim stack (the egl-probe wall)" for why each step is needed.
 torch==2.11.0+cu128
 torchvision==0.26.0+cu128
 torchcodec==0.11.1+cu128

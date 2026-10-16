@@ -602,6 +602,10 @@ scaling. The slope sits at ~0.01, not the controller's `output_max` of 0.05, so 
 
 ### Installing the sim stack (the `egl-probe` wall)
 
+**The recipe lives in README, "Simulator, for evaluation only".** It is the fresh-clone
+document; this section is only the reasoning behind each step, and the commands are
+deliberately not repeated here — they drifted once already.
+
 `lerobot[libero]` pulls `hf-libero`, which pins `robomimic==0.2.0`, which depends on the
 original `egl-probe` — and that package compiles C against EGL headers Athena's login node
 does not have, so `uv pip install` dies at the CMake step. `hf-libero` ships `hf-egl-probe`
@@ -609,40 +613,73 @@ precisely to avoid this, but robomimic's own metadata still names the old one. `
 fails to build for the same reason.
 
 Neither is actually needed: `egl_probe` is imported only inside `robomimic/envs/env_robosuite.py`
-and `env_ig_momart.py`, and LIBERO's `OffScreenRenderEnv` wraps robosuite directly. So:
-
-```bash
-uv pip install -c constraints.txt --no-deps hf-libero==0.1.4 robomimic==0.2.0
-uv pip install -c constraints.txt \
-  "hydra-core>=1.2,<1.4" "robosuite==1.4.0" "bddl==1.0.1" easydict einops thop \
-  "matplotlib>=3.5.3" "cloudpickle>=2.0.0" "mujoco>=3.0,<3.9" "future>=0.18.2" \
-  h5py psutil tqdm termcolor tensorboard tensorboardX imageio imageio-ffmpeg
-uv pip install --reinstall-package opencv-python-headless "opencv-python-headless==4.12.0.88"
-```
-
-`constraints.txt` pins torch/torchvision/torchcodec/transformers/numpy/lerobot/accelerate/
-peft/huggingface-hub to their installed versions. With it, the install is **49 pure additions
-— nothing removed, nothing downgraded**; verify with a `uv pip freeze` diff before and after.
-The last line matters because `robosuite` requires GUI `opencv-python`, which would clobber
-the headless `cv2` the rest of the stack was built on.
+and `env_ig_momart.py`, and LIBERO's `OffScreenRenderEnv` wraps robosuite directly. Hence
+`--no-deps` on `hf-libero`/`robomimic`, with robomimic's real dependencies re-added by hand.
 
 This is why `lerobot[libero]` is still not in `pyproject.toml`: a plain `uv sync` cannot
 express the `--no-deps` step and would fail at `egl-probe`.
 
+`constraints.txt` pins torch/torchvision/torchcodec/transformers/numpy/lerobot/accelerate/
+peft/huggingface-hub to their installed versions, so the install only adds; without it the
+resolver will downgrade numpy or pull a PyPI (CPU) torch over the cu128 one. Verify with a
+`uv pip freeze` diff before and after. The file is a `uv pip` flag only — `uv sync` and
+`uv lock` have no `--constraint` and ignore it entirely.
+
+Two sharp edges, both verified, both spelled out in README where the commands are:
+
+- **`uv sync` deletes the sim stack** — it is exact by default and none of these packages are
+  in `uv.lock`, so `--inexact` is mandatory afterwards.
+- **`--reinstall-package opencv-python-headless` does not remove the GUI distribution** that
+  `robosuite` pulls in, so an explicit `uv pip uninstall opencv-python` is required. The two
+  distributions ship the same `cv2` module under different names, which is why no resolver
+  reports the conflict. `scripts/verify_env.py` imports `cv2` *and* checks which
+  distribution owns it: metadata alone reports a healthy cv2 in the window between the
+  uninstall and the reinstall, when the shared files are gone.
+
 ### Runtime configuration
 
 - `MUJOCO_GL=egl`. Compute nodes have `libEGL_nvidia.so.0` and `/usr/share/glvnd/egl_vendor.d/10_nvidia.json`;
-  **login nodes have no GL at all**, so anything touching the renderer must run under SLURM.
-  `libOSMesa.so.8` is absent, so osmesa is not a fallback.
+  login nodes have **no NVIDIA EGL vendor ICD**, and `libOSMesa.so.8` is absent so osmesa is
+  not a fallback — anything touching the renderer must run under SLURM. (Precisely: a bare
+  `import robosuite` on a login node dies with `'NoneType' object has no attribute
+  'eglQueryString'`, raised in `OpenGL/raw/EGL/_types.py` from `mujoco/egl/egl_ext.py`. It *appears* to work under `slurm/common.sh` only because the
+  micromamba FFmpeg prefix on `LD_LIBRARY_PATH` happens to ship a conda-forge `libEGL.so.1`;
+  that is a loader accident, not a working renderer, which is why `verify_env.py` reads
+  robosuite's version from metadata instead of importing it.)
 - `MUJOCO_EGL_DEVICE_ID` / `EGL_DEVICE_ID` are set to `LOCAL_RANK` so each rank renders on
   its own GPU.
-- `LIBERO_CONFIG_PATH=$SCRATCH/vla_finetuning/libero_config`. LIBERO otherwise writes
-  `~/.libero/config.yaml` **via an interactive `input()` prompt at import time**, which hangs
-  a batch job until it EOFs.
-- LIBERO's mesh/texture assets (422 MB) are not in the wheel; they download from the Hub to
-  `~/.cache/libero` on first use. Moved to `$SCRATCH/vla_finetuning/libero_assets` with a
-  symlink at `<site-packages>/libero/libero/assets`, because `$HOME` has a 10 GiB quota that
-  blocks job submission at 90% (see below).
+- `LIBERO_CONFIG_PATH=$SCRATCH/vla_finetuning/libero_config`. LIBERO writes a `config.yaml`
+  on first import and asks for the dataset path **via an interactive `input()` at import
+  time** when that file does not exist, which hangs a batch job until stdin EOFs (`EOFError`
+  when stdin is closed). The trigger is the **missing file, not the unset variable**:
+  `slurm/common.sh:49` exports `LIBERO_CONFIG_PATH` but never creates the config, so the
+  file has to be written once, non-interactively (README has the heredoc). A guard that
+  asserts only on the env var passes and then hangs.
+- LIBERO's mesh/texture assets (409 MB on disk) are not in the wheel — the `hf-libero` wheel
+  ships zero asset files. `get_assets_path()` (`libero/libero/__init__.py:68-97`) returns the
+  package's own `assets/` directory **whenever that path merely exists**, and only otherwise
+  downloads, to a hardcoded `os.path.join(os.path.expanduser("~"), ".cache", "libero",
+  "assets")`. Neither `XDG_CACHE_HOME` nor `HF_HOME` moves that destination — it is a
+  `snapshot_download(local_dir=…)` call — and there is no setting for it. Two consequences:
+    - The default lands 409 MB in `$HOME`, whose 10 GiB quota blocks job submission at 90%
+      (see below). The fix is to redirect the cache directory itself:
+      `ln -sfn $VLA_ROOT/libero_assets ~/.cache/libero/assets`, then let LIBERO download
+      through it. README has the recipe. This is preferred over planting a symlink inside
+      site-packages: it leaves the package alone, so a venv rebuild costs nothing, and it
+      avoids the trap below entirely.
+    - The `exists()` check **fails open**: an `assets/` path inside the package that is
+      empty, or a symlink to a still-empty target, permanently suppresses the download, and
+      every object XML lookup then resolves into an empty tree with no error. If you do wire
+      it up that way, populate the target *first*.
+    - Current state on this account is the older wiring and still valid:
+      `$SCRATCH/vla_finetuning/libero_assets`, symlinked from
+      `<site-packages>/libero/libero/assets`, and named in `config.yaml`'s `assets:` key
+      (which nothing actually reads — only `get_assets_path()` wires assets up).
+      `verify_env.py` accepts either wiring, resolving them in the same order
+      `get_assets_path()` does, and asserts five known asset subdirectories exist. It
+      deliberately does **not** call `get_assets_path()`: that function is not a read-only
+      probe, so a check built on it would itself trigger the 409 MB download into `$HOME`
+      whenever the symlink is broken, then pass against the fresh copy and hide the breakage.
 
 ### Cost
 

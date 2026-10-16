@@ -85,6 +85,172 @@ source slurm/common.sh        # venv + caches + .env; no manual activation neede
 python scripts/verify_env.py
 ```
 
+`uv sync` + `verify_env.py` covers the Python packages. Training additionally needs the
+[FFmpeg shared libraries](#ffmpeg) and [`.env`](#secrets-env-required) below, and both are
+required. Note that `verify_env.py` catches a missing FFmpeg but has **no `.env` check** —
+without `HF_TOKEN` and an accepted PaliGemma licence the preflight still passes and training
+dies later.
+
+### Simulator, for evaluation only
+
+Closed-loop rollouts (`scripts/eval_libero.py`, `slurm/pi0_libero_eval.sbatch`) need LIBERO,
+which has to be installed by hand instead of declared in `pyproject.toml`. The culprit is
+`robomimic`: it requires `egl-probe`, which ships no wheels and compiles against EGL
+development headers. Those come from a `-devel` package that cluster images routinely leave
+out, so the build fails, and because `uv sync` resolves and builds the whole graph in one go
+it would take the training environment down with it. Installing LIBERO anyway means passing
+`--no-deps`.
+
+```bash
+source slurm/common.sh                  # REQUIRED: uv pip needs the venv active
+uv pip install -c constraints.txt --no-deps hf-libero==0.1.4 robomimic==0.2.0
+uv pip install -c constraints.txt \
+  "hydra-core>=1.2,<1.4" "robosuite==1.4.0" "bddl==1.0.1" easydict einops thop \
+  "matplotlib>=3.5.3" "cloudpickle>=2.0.0" "mujoco>=3.0,<3.9" "future>=0.18.2" \
+  h5py psutil tqdm termcolor tensorboard tensorboardX imageio imageio-ffmpeg
+uv pip uninstall opencv-python && \
+  uv pip install -c constraints.txt --reinstall-package opencv-python-headless \
+    "opencv-python-headless==4.12.0.88"
+```
+
+The two opencv commands are `&&`-chained on purpose —
+the uninstall deletes the shared `cv2/` files, so stopping between them leaves an
+environment where `import cv2` fails.
+
+`--no-deps` is safe on the first line because `egl_probe` is imported only by
+`robomimic/envs/env_robosuite.py` and `env_ig_momart.py`, and LIBERO's `OffScreenRenderEnv`
+wraps robosuite directly — nothing on the rollout path reaches it. (`hf-libero` ships an
+`hf-egl-probe` to dodge this, but robomimic's metadata still names the original, and that
+fork fails to build for the same reason.) The second line therefore re-adds robomimic's real
+dependencies by hand.
+
+**`-c constraints.txt` is not optional.** The constraints pin
+torch/torchvision/torchcodec/transformers/numpy/lerobot/accelerate/peft/huggingface-hub to
+what is already installed, so the install only adds.
+
+**The opencv dance is load-bearing.** `robosuite==1.4.0` declares `Requires-Dist:
+opencv-python`, the GUI build, which ships the same `cv2` module as the headless build the
+rest of the stack uses — different distribution names, so no resolver reports a conflict and
+whichever installed last wins the files. `--reinstall-package` alone only rewrites files; it
+does not remove the GUI distribution, hence the explicit `uninstall`. `verify_env.py` checks
+which distribution owns `cv2` and fails if it is the GUI one.
+
+> **`uv sync` will delete all of this.** `uv sync` is exact by default — it removes packages
+> not in `uv.lock`, and none of the sim stack is in there. After installing the simulator,
+> use **`uv sync --inexact`** from then on, or re-run the block above. (`constraints.txt` is
+> a `uv pip` flag and has no effect on `uv sync` either way.)
+
+#### Assets: 409 MB, downloaded to `$HOME` by default
+
+LIBERO's meshes and textures are not in the wheel. `get_assets_path()` resolves them against
+exactly two paths — and the `assets:` key in `config.yaml` is **not** one of them. It returns
+`<site-packages>/libero/libero/assets` if that exists, and otherwise downloads from the Hub
+into a hardcoded `~/.cache/libero/assets` — `os.path.expanduser("~")`, so `XDG_CACHE_HOME`
+does not move it, and neither does `HF_HOME` (it calls `snapshot_download(local_dir=…)`).
+On a cluster with a home quota that default is fatal: Athena gives `$HOME` 10 GB and
+**`sbatch` refuses jobs past 90 % usage**.
+
+Since there is no setting for it, fetch the assets onto scratch yourself and point the
+hardcoded path at them. Downloading here rather than letting the first rollout do it keeps
+409 MB of transfer out of an allocation, and keeping the assets outside the venv means
+rebuilding the environment does not cost a re-download:
+
+```bash
+source slurm/common.sh
+echo "$VLA_ROOT"
+hf download lerobot/libero-assets --repo-type dataset \
+  --local-dir "$VLA_ROOT/libero_assets"
+mkdir -p ~/.cache/libero
+ln -sfn "$VLA_ROOT/libero_assets" ~/.cache/libero/assets
+```
+
+The symlink is the load-bearing half: downloading alone leaves both of the paths above
+untouched. With `$VLA_ROOT/libero_assets` already populated, LIBERO's own fetch
+short-circuits — it checks `os.path.exists(~/.cache/libero/assets)` and then for
+`articulated_objects/`, `stable_scanned_objects/`, `turbosquid_objects/` and
+`stable_hope_objects/` inside it, and both checks follow the symlink — so it prints *Assets
+already downloaded* and never opens a connection. Running the two commands in the other
+order is equally fine; the first rollout then writes through the symlink onto scratch
+instead.
+
+> **Do not leave an _empty_ `assets/` directory inside the installed package.**
+> `get_assets_path()` returns that path the moment it *exists* and only downloads otherwise,
+> so an empty one silently disables the download and leaves every object lookup resolving
+> into nothing. A *symlink* there pointing at populated assets works exactly as well as the
+> `~/.cache` one — but it sits inside the venv, where `uv sync` or any rebuild destroys it.
+
+#### The import-time `input()` prompt
+
+`libero/libero/__init__.py` writes a `config.yaml` on first import, and asks for the dataset
+path **interactively** when that file does not exist — which hangs a batch job until stdin
+EOFs. `slurm/common.sh` exports `LIBERO_CONFIG_PATH` but does **not** create the file, so
+write it once, non-interactively:
+
+```bash
+source slurm/common.sh
+SITE=$(python -c 'import sysconfig;print(sysconfig.get_paths()["purelib"])')
+mkdir -p "$LIBERO_CONFIG_PATH"
+cat > "$LIBERO_CONFIG_PATH/config.yaml" <<EOF
+assets: $VLA_ROOT/libero_assets
+bddl_files: $SITE/libero/libero/bddl_files
+benchmark_root: $SITE/libero/libero
+datasets: $SITE/libero/libero/../datasets
+init_states: $SITE/libero/libero/init_files
+EOF
+```
+
+Only `bddl_files`, `init_states` and `datasets` are actually read back (via
+`get_libero_path()`); `benchmark_root` just seeds the others. **`assets:` is inert** — nothing
+in LIBERO reads it, because assets resolve solely through `get_assets_path()`, i.e. the cache
+redirect above. It is written here to match the file's expected shape, not to wire anything
+up, so do not treat it as a substitute for that step.
+
+#### Rollouts must run on a compute node
+
+`slurm/common.sh` exports `MUJOCO_GL=egl` and `LIBERO_CONFIG_PATH`; `eval_libero.py` sets
+`MUJOCO_EGL_DEVICE_ID`/`EGL_DEVICE_ID` per rank so each renders on its own GPU — no manual
+step. But login nodes have no NVIDIA EGL vendor ICD and no `libOSMesa.so.8`, so there is no
+software fallback: anything that renders has to run under SLURM.
+
+Verify the whole thing on a compute node — `headless cv2` and `libero sim stack` should both
+report `OK`, and the assets check will catch an absent, dangling or incomplete tree. This
+needs `SBATCH_PARTITION`/`SBATCH_ACCOUNT` exported first (see
+[Where things are configured](#where-things-are-configured)):
+
+```bash
+srun -p $SBATCH_PARTITION -A $SBATCH_ACCOUNT --gres=gpu:1 -t 00:10:00 \
+  bash -c 'source slurm/common.sh && python scripts/verify_env.py'
+```
+
+Then run the rollouts. Note `slurm/pi0_libero_eval.sbatch` evaluates **both** checkpoints —
+it reads `$CKPT_ROOT/pi0_libero/adapter_best` and `$CKPT_ROOT/pi0_full/model_best` — so
+Phase 2 and Phase 2B both have to have finished, or point `CKPT_ROOT` at an archive that
+holds them:
+
+```bash
+sbatch slurm/pi0_libero_eval.sbatch
+```
+
+#### Camera orientation, if the dataset ever changes
+
+robosuite renders origin-bottom-left *and* mirrored, so the RLDS→LeRobot port rotates frames
+180°. `eval_libero.py` defaults to `--image-transform rot180` to match, so there is nothing
+to do for the datasets used here — but a wrong orientation is the worst failure mode in this
+repo: rollouts run perfectly, score ~0%, and log nothing to explain it. It is measured, not
+assumed (agentview MSE **0.006** for rot180 against **0.064-0.095** for the alternatives;
+wrist **0.015** vs **0.089-0.136**). If you point the harness at a different dataset or port,
+re-measure first:
+
+```bash
+srun -p $SBATCH_PARTITION -A $SBATCH_ACCOUNT --gres=gpu:1 -t 00:20:00 \
+  bash -c 'source slurm/common.sh && python scripts/eval_libero.py --verify-obs'
+```
+
+It scores all four candidate flips against real dataset frames and prints the winner. Same
+goes for the observation *format*: this harness builds the dataset's layout
+(`observation.images.image` + `wrist_image`, one 8-D state), not lerobot's `LiberoEnv`
+default — feeding the policy the latter also runs and also scores near zero.
+
 ### Where things are configured
 
 Every job script starts with one line — `source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"` —
