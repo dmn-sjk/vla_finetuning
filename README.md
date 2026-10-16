@@ -1,19 +1,14 @@
 # Distributed Fine-Tuning of a Vision-Language-Action Model
 
 End-to-end distributed training pipeline for fine-tuning a Vision-Language-Action (VLA) model
-for robotic manipulation, built for a multi-GPU SLURM cluster. The model maps multi-camera
-visual input and a natural-language instruction to continuous robot control actions.
+for robotic manipulation, built for a multi-GPU SLURM cluster.
 
-The project is deliberately split into phases. Phase 1, a raw `torch.distributed` loop on a
-synthetic toy model, was removed once the repository was cut down to the code behind the
-published checkpoints; it remains in git history.
+This is a code that was used to finetune the two $\pi_{0}$ weight checkpoints on LIBERO-Spatial available on HF: 
 
-- **Phase 2 — multimodal scaling.** LoRA fine-tuning of **π0** (~4B: a PaliGemma backbone
-  plus a flow-matching action expert) on the **LIBERO** manipulation benchmark via
-  `lerobot` and `peft`. *Implemented and verified; this is the production recipe.*
-- **Phase 2B — sharded full fine-tuning.** All 4.03B parameters trainable, sharded with
-  **FSDP** through `accelerate` (ZeRO-2 and ZeRO-3 equivalents). Full FT needs ~64 GiB before
-  activations. *Implemented and measured.*
+1. LoRA tuning: [pi0-libero-spatial-lora](https://huggingface.co/dmnsjk/pi0-libero-spatial-lora). [Model card](model_cards/pi0-libero-spatial-lora.md).
+2. Full Finetuning: [pi0-libero-spatial-full](https://huggingface.co/dmnsjk/pi0-libero-spatial-full). [Model card](model_cards/pi0-libero-spatial-full.md).
+
+
 
 `lerobot`'s implementation of π0 is used. π0 is finetuned on **LIBERO** manipulation benchmark.
 
@@ -57,18 +52,11 @@ loaders and evaluation function, so a full-FT number and a LoRA number are measu
 the same held-out episodes.
 
 ## Setup
-
 Requires [uv](https://docs.astral.sh/uv/). Dependencies are pinned in `uv.lock`.
 
-Everything lives under one directory, `$VLA_ROOT` — the virtualenv, the HF and Triton
-caches, the FFmpeg prefix and all run outputs. It defaults to `work/` inside the repository
-(gitignored), so a fresh clone needs nothing exported:
+1.By design, all downloaded content lives under one directory, `$VLA_ROOT` — the virtualenv, the HF and Triton
+caches, the FFmpeg prefix and all run outputs. It defaults to `work/` inside the repository. You can adjust this path by exporting VLA_ROOT variable:
 
-```bash
-uv sync                      # creates ./.venv, which the job scripts find on their own
-```
-
-To keep the venv, the caches and the run outputs somewhere else, export `VLA_ROOT` and everything follows it:
 
 ```bash
 export VLA_ROOT=/path/to/work
@@ -78,26 +66,71 @@ uv sync
 
 See [Where things are configured](#where-things-are-configured) below for the full resolution order.
 
-After setup, verify if the pieces actually work here. Run it on a compute node:
+
+
+
+
+
+2.**If your system already provides FFmpeg 7 shared libraries, this step is unnecessary.** `lerobot` decodes trajectory video through `torchcodec`, which needs FFmpeg shared
+libraries. torchcodec's own
+documentation recommends conda-forge; `micromamba` is a fast single-binary client for it:
+```bash
+curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj bin/micromamba
+./bin/micromamba -r $VLA_ROOT/.mamba create -y -p $VLA_ROOT/ffmpeg \
+  -c conda-forge "ffmpeg=7.*"
+```
+
+Jobs put it on the library path (`slurm/common.sh` already does this, and skips it when the
+system provides FFmpeg 7):
+
+```bash
+export LD_LIBRARY_PATH=$VLA_FFMPEG_PREFIX/lib:${LD_LIBRARY_PATH:-}
+```
+
+
+torchcodec also links **NVIDIA NPP** (`libnppicc.so.12`) for GPU colour conversion, which
+torch does not ship — it has no use for it. The `nvidia-npp-cu12` wheel is therefore a
+direct dependency, and `src/runtime.py:preload_npp()` loads it `RTLD_GLOBAL` before
+torchcodec is imported. That keeps the fix inside the process rather than requiring another
+`LD_LIBRARY_PATH` entry, so **entrypoints must call `preload_npp()` before importing
+`lerobot` or `torchcodec`**.
+ TODO
+
+3.Code reads HF and WANDB credentials from a `.env` file in the repository root. Login to those services separately using CLI or use the `.env`:
+```bash
+cat > .env <<'EOF'
+HF_TOKEN=<hf_token>
+WANDB_API_KEY=<wandb_api_key>
+EOF
+chmod 600 .env
+```
+
+You must also accept the licence for [`google/paligemma-3b-pt-224`](https://huggingface.co/google/paligemma-3b-pt-224) with the same HF account. π0's tokenizer is loaded from that gated repo.
+
+
+After setup, verify if the pieces actually work here:
 
 ```bash
 source slurm/common.sh        # venv + caches + .env; no manual activation needed
 python scripts/verify_env.py
 ```
 
-`uv sync` + `verify_env.py` covers the Python packages. Training additionally needs the
-[FFmpeg shared libraries](#ffmpeg) and [`.env`](#secrets-env-required) below, and both are
-required. Note that `verify_env.py` catches a missing FFmpeg but has **no `.env` check** —
-without `HF_TOKEN` and an accepted PaliGemma licence the preflight still passes and training
-dies later.
+### SLURM setup
 
-### Simulator, for evaluation only
+No job script carries an account or a partition. Set them once per shell and every script submits unchanged:
+```bash
+export SBATCH_PARTITION=<gpu-partition>
+export SBATCH_ACCOUNT=<account>        # only if your default account is not the right one
+```
+
+
+
+### Simulator Setup -  Evaluation Only
 
 Closed-loop rollouts (`scripts/eval_libero.py`, `slurm/pi0_libero_eval.sbatch`) need LIBERO,
-which has to be installed by hand instead of declared in `pyproject.toml`. The culprit is
+which has to be installed by hand instead of declared in `pyproject.toml`. The isue is with
 `robomimic`: it requires `egl-probe`, which ships no wheels and compiles against EGL
-development headers. Those come from a `-devel` package that cluster images routinely leave
-out, so the build fails, and because `uv sync` resolves and builds the whole graph in one go
+development headers. Those come from a `-devel` package, and because `uv sync` resolves and builds the whole graph in one go
 it would take the training environment down with it. Installing LIBERO anyway means passing
 `--no-deps`.
 
@@ -113,47 +146,17 @@ uv pip uninstall opencv-python && \
     "opencv-python-headless==4.12.0.88"
 ```
 
-The two opencv commands are `&&`-chained on purpose —
-the uninstall deletes the shared `cv2/` files, so stopping between them leaves an
-environment where `import cv2` fails.
-
-`--no-deps` is safe on the first line because `egl_probe` is imported only by
-`robomimic/envs/env_robosuite.py` and `env_ig_momart.py`, and LIBERO's `OffScreenRenderEnv`
-wraps robosuite directly — nothing on the rollout path reaches it. (`hf-libero` ships an
-`hf-egl-probe` to dodge this, but robomimic's metadata still names the original, and that
-fork fails to build for the same reason.) The second line therefore re-adds robomimic's real
-dependencies by hand.
 
 **`-c constraints.txt` is not optional.** The constraints pin
 torch/torchvision/torchcodec/transformers/numpy/lerobot/accelerate/peft/huggingface-hub to
 what is already installed, so the install only adds.
 
-**The opencv dance is load-bearing.** `robosuite==1.4.0` declares `Requires-Dist:
-opencv-python`, the GUI build, which ships the same `cv2` module as the headless build the
-rest of the stack uses — different distribution names, so no resolver reports a conflict and
-whichever installed last wins the files. `--reinstall-package` alone only rewrites files; it
-does not remove the GUI distribution, hence the explicit `uninstall`. `verify_env.py` checks
-which distribution owns `cv2` and fails if it is the GUI one.
 
-> **`uv sync` will delete all of this.** `uv sync` is exact by default — it removes packages
-> not in `uv.lock`, and none of the sim stack is in there. After installing the simulator,
-> use **`uv sync --inexact`** from then on, or re-run the block above. (`constraints.txt` is
-> a `uv pip` flag and has no effect on `uv sync` either way.)
+> **`uv sync` will delete all of this.** It removes packages not in `uv.lock`, and none of the sim stack is in there. After installing the simulator, use **`uv sync --inexact`** from then on, or re-run the block above.
+#### LIBERO Assets Setup
 
-#### Assets: 409 MB, downloaded to `$HOME` by default
 
-LIBERO's meshes and textures are not in the wheel. `get_assets_path()` resolves them against
-exactly two paths — and the `assets:` key in `config.yaml` is **not** one of them. It returns
-`<site-packages>/libero/libero/assets` if that exists, and otherwise downloads from the Hub
-into a hardcoded `~/.cache/libero/assets` — `os.path.expanduser("~")`, so `XDG_CACHE_HOME`
-does not move it, and neither does `HF_HOME` (it calls `snapshot_download(local_dir=…)`).
-On a cluster with a home quota that default is fatal: Athena gives `$HOME` 10 GB and
-**`sbatch` refuses jobs past 90 % usage**.
-
-Since there is no setting for it, fetch the assets onto scratch yourself and point the
-hardcoded path at them. Downloading here rather than letting the first rollout do it keeps
-409 MB of transfer out of an allocation, and keeping the assets outside the venv means
-rebuilding the environment does not cost a re-download:
+Download the assets from Hugging Face to chosen directory and link them to LIBERO cache:
 
 ```bash
 source slurm/common.sh
@@ -164,28 +167,9 @@ mkdir -p ~/.cache/libero
 ln -sfn "$VLA_ROOT/libero_assets" ~/.cache/libero/assets
 ```
 
-The symlink is the load-bearing half: downloading alone leaves both of the paths above
-untouched. With `$VLA_ROOT/libero_assets` already populated, LIBERO's own fetch
-short-circuits — it checks `os.path.exists(~/.cache/libero/assets)` and then for
-`articulated_objects/`, `stable_scanned_objects/`, `turbosquid_objects/` and
-`stable_hope_objects/` inside it, and both checks follow the symlink — so it prints *Assets
-already downloaded* and never opens a connection. Running the two commands in the other
-order is equally fine; the first rollout then writes through the symlink onto scratch
-instead.
 
-> **Do not leave an _empty_ `assets/` directory inside the installed package.**
-> `get_assets_path()` returns that path the moment it *exists* and only downloads otherwise,
-> so an empty one silently disables the download and leaves every object lookup resolving
-> into nothing. A *symlink* there pointing at populated assets works exactly as well as the
-> `~/.cache` one — but it sits inside the venv, where `uv sync` or any rebuild destroys it.
 
-#### The import-time `input()` prompt
-
-`libero/libero/__init__.py` writes a `config.yaml` on first import, and asks for the dataset
-path **interactively** when that file does not exist — which hangs a batch job until stdin
-EOFs. `slurm/common.sh` exports `LIBERO_CONFIG_PATH` but does **not** create the file, so
-write it once, non-interactively:
-
+Create LIBERO config file:
 ```bash
 source slurm/common.sh
 SITE=$(python -c 'import sysconfig;print(sysconfig.get_paths()["purelib"])')
@@ -199,68 +183,16 @@ init_states: $SITE/libero/libero/init_files
 EOF
 ```
 
-Only `bddl_files`, `init_states` and `datasets` are actually read back (via
-`get_libero_path()`); `benchmark_root` just seeds the others. **`assets:` is inert** — nothing
-in LIBERO reads it, because assets resolve solely through `get_assets_path()`, i.e. the cache
-redirect above. It is written here to match the file's expected shape, not to wire anything
-up, so do not treat it as a substitute for that step.
 
-#### Rollouts must run on a compute node
 
-`slurm/common.sh` exports `MUJOCO_GL=egl` and `LIBERO_CONFIG_PATH`; `eval_libero.py` sets
-`MUJOCO_EGL_DEVICE_ID`/`EGL_DEVICE_ID` per rank so each renders on its own GPU — no manual
-step. But login nodes have no NVIDIA EGL vendor ICD and no `libOSMesa.so.8`, so there is no
-software fallback: anything that renders has to run under SLURM.
 
-Verify the whole thing on a compute node — `headless cv2` and `libero sim stack` should both
-report `OK`, and the assets check will catch an absent, dangling or incomplete tree. This
-needs `SBATCH_PARTITION`/`SBATCH_ACCOUNT` exported first (see
-[Where things are configured](#where-things-are-configured)):
-
-```bash
-srun -p $SBATCH_PARTITION -A $SBATCH_ACCOUNT --gres=gpu:1 -t 00:10:00 \
-  bash -c 'source slurm/common.sh && python scripts/verify_env.py'
-```
-
-Then run the rollouts. Note `slurm/pi0_libero_eval.sbatch` evaluates **both** checkpoints —
-it reads `$CKPT_ROOT/pi0_libero/adapter_best` and `$CKPT_ROOT/pi0_full/model_best` — so
-Phase 2 and Phase 2B both have to have finished, or point `CKPT_ROOT` at an archive that
-holds them:
-
-```bash
-sbatch slurm/pi0_libero_eval.sbatch
-```
-
-#### Camera orientation, if the dataset ever changes
-
-robosuite renders origin-bottom-left *and* mirrored, so the RLDS→LeRobot port rotates frames
-180°. `eval_libero.py` defaults to `--image-transform rot180` to match, so there is nothing
-to do for the datasets used here — but a wrong orientation is the worst failure mode in this
-repo: rollouts run perfectly, score ~0%, and log nothing to explain it. It is measured, not
-assumed (agentview MSE **0.006** for rot180 against **0.064-0.095** for the alternatives;
-wrist **0.015** vs **0.089-0.136**). If you point the harness at a different dataset or port,
-re-measure first:
-
-```bash
-srun -p $SBATCH_PARTITION -A $SBATCH_ACCOUNT --gres=gpu:1 -t 00:20:00 \
-  bash -c 'source slurm/common.sh && python scripts/eval_libero.py --verify-obs'
-```
-
-It scores all four candidate flips against real dataset frames and prints the winner. Same
-goes for the observation *format*: this harness builds the dataset's layout
-(`observation.images.image` + `wrist_image`, one 8-D state), not lerobot's `LiberoEnv`
-default — feeding the policy the latter also runs and also scores near zero.
-
-### Where things are configured
+### Where Things Are Configured
 
 Every job script starts with one line — `source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"` —
 and that file resolves the whole environment: it sources `.env`, exports the cache
 locations, puts FFmpeg on the library path, and activates the virtualenv.
 
-Each variable is only *defaulted*, so an exported value always wins. `sbatch` propagates
-the submitting environment, so exporting one in your shell (or `~/.bashrc`) changes every
-job:
-
+Each variable is only *defaulted*, so an exported value always wins.
 | Variable | Default | What it controls |
 | --- | --- | --- |
 | `VLA_ROOT` | `work/` in the repository | work root for everything below |
@@ -268,96 +200,11 @@ job:
 | `VLA_RUNS` | `$VLA_ROOT/runs` | where training **writes** checkpoints (the entrypoints' default `--out`) |
 | `VLA_FFMPEG_PREFIX` | `$VLA_ROOT/ffmpeg` | prefix holding the FFmpeg 7 shared libraries |
 | `HF_HOME`, `TRITON_CACHE_DIR`, `WANDB_DIR`, `LIBERO_CONFIG_PATH` | under `$VLA_ROOT` | caches |
-| `CKPT_ROOT` | an archive on permanent storage, else `$VLA_RUNS` | where evaluation **reads** finished checkpoints from |
+| `CKPT_ROOT` | an archive on permanent storage, else `$VLA_RUNS` | where evaluation reads finished checkpoints from |
 | `NCCL_SOCKET_IFNAME` | `ib0` | network interface NCCL uses to set up multi-GPU communication |
 
-`CKPT_ROOT` is the one that is not just a path preference. The eval and publish jobs only
-read from it — `$CKPT_ROOT/pi0_libero/adapter_best`,
-`$CKPT_ROOT/pi0_full/model_best` — so pointing it at a write-protected copy on permanent
-storage keeps those runs reproducible after `$VLA_RUNS` is purged. It falls back to
-`$VLA_RUNS`, which is where a training job has just left them.
-
-No job script carries an account or a partition: `#SBATCH` directives cannot expand
-variables, so any name written there would be wrong everywhere else. SLURM reads both from
-the environment instead — set them once per shell and every script submits unchanged:
-
-```bash
-export SBATCH_PARTITION=<gpu-partition>
-export SBATCH_ACCOUNT=<account>        # only if your default account is not the right one
-```
 
 
-### lerobot version is load-bearing
-
-Two independent constraints pin **lerobot 0.6.x** (hence Python 3.12):
-
-1. `lerobot` fetches hub datasets by **git tag matching its own `CODEBASE_VERSION`**, not
-   from `main`. lerobot 0.3.x is `v2.1`; the official LIBERO ports carry only a `v3.0` tag,
-   so they are *silently* unreachable from 0.3.x.
-2. lerobot 0.4.x's π0 refuses to build against stock transformers — it imports
-   `transformers.models.siglip.check`, which exists only on the HF branch
-   `fix/lerobot_openpi`. That branch has since been rebased onto transformers 5.x, which
-   violates 0.4.x's own `transformers<5` cap, so **0.4.x + π0 is unsatisfiable today**.
-   0.5+ dropped the fork and runs π0 on stock transformers.
-
-lerobot 0.6.1's `torch<2.12` / `torchcodec<0.12` caps are what put the stack on cu128.
-
-### FFmpeg
-
-`lerobot` decodes trajectory video through `torchcodec`, which needs FFmpeg **shared
-libraries**. These are C libraries, not Python wheels, so `uv` cannot provide them — and the
-FFmpeg bundled inside PyAV is unusable here, because `auditwheel` hash-mangles its SONAMEs
-specifically to prevent other packages from linking against it. torchcodec's own
-documentation recommends conda-forge; `micromamba` is a fast single-binary client for it.
-Athena has no FFmpeg module and no system libav, so it is installed into the project
-directory:
-
-```bash
-curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj bin/micromamba
-./bin/micromamba -r $VLA_ROOT/.mamba create -y -p $VLA_ROOT/ffmpeg \
-  -c conda-forge "ffmpeg=7.*"
-```
-
-Jobs put it on the library path (`slurm/common.sh` already does this, and skips it when the
-system provides FFmpeg 7):
-
-```bash
-export LD_LIBRARY_PATH=$VLA_FFMPEG_PREFIX/lib:${LD_LIBRARY_PATH:-}
-```
-
-Without it, `import torchcodec` fails and dataset loading dies at the first video frame. If
-your system already provides FFmpeg 7 shared libraries, this step is unnecessary.
-
-torchcodec also links **NVIDIA NPP** (`libnppicc.so.12`) for GPU colour conversion, which
-torch does not ship — it has no use for it. The `nvidia-npp-cu12` wheel is therefore a
-direct dependency, and `src/runtime.py:preload_npp()` loads it `RTLD_GLOBAL` before
-torchcodec is imported. That keeps the fix inside the process rather than requiring another
-`LD_LIBRARY_PATH` entry, so **entrypoints must call `preload_npp()` before importing
-`lerobot` or `torchcodec`**.
-
-### Secrets: `.env` (required)
-
-Training reads credentials from a `.env` file in the repository root. **It is gitignored and
-must never be committed.** Create it yourself:
-
-```bash
-cat > .env <<'EOF'
-HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-WANDB_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-EOF
-chmod 600 .env
-```
-
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `HF_TOKEN` | yes | Pull gated model weights and push the trained LoRA adapter. Needs **write** scope — a read token fails only at the final push. Create at <https://huggingface.co/settings/tokens>. |
-| — | — | **You must also accept the licence for [`google/paligemma-3b-pt-224`](https://huggingface.co/google/paligemma-3b-pt-224)** with the same account. π0's tokenizer is loaded from that gated repo, so without it training dies at processor construction with a 403. The π0 weights themselves (`lerobot/pi0`) are *not* gated, which makes this easy to miss. |
-| `WANDB_API_KEY` | optional | Training telemetry. Can be omitted if `~/.netrc` already holds W&B credentials, or if you run without `--wandb`. |
-
-`python-dotenv` is not a dependency, so nothing loads `.env` implicitly — the shell sources
-it. `slurm/common.sh` does this for every job, and `source slurm/common.sh` does it for an
-interactive shell too. As an alternative to `.env`,
-`hf auth login` stores the token under `$HF_HOME` instead, outside the repository.
 
 ## Running
 
@@ -365,11 +212,10 @@ interactive shell too. As an alternative to `.env`,
 plain `python ...` commands below assume you have run `source slurm/common.sh` first, which
 activates the venv and exports `$VLA_RUNS`.
 
-### Phase 2 (π0 + LoRA on LIBERO)
+### π0 + LoRA on LIBERO
 
 ```bash
-sbatch slurm/pi0_train.sbatch    # 8 GPUs, 7 epochs, ~70 min
-sbatch slurm/pi0_scaling.sbatch  # 1/2/4 GPU throughput at fixed effective batch
+sbatch slurm/pi0_train.sbatch    # 8 GPUs, 7 epochs
 ```
 
 Evaluate a saved adapter. **Always pass `--repeats`**: π0 is a flow-matching model, so
@@ -380,17 +226,14 @@ python scripts/eval_adapter.py --adapter $VLA_RUNS/pi0_libero/adapter_best \
   --repeats 5
 ```
 
-Publish `adapter_best/`, never `adapter/` — the latter is the final epoch, which overfits.
 
-### Phase 2B (π0 full fine-tuning, sharded with FSDP)
+### π0 full fine-tuning, sharded with FSDP
 
 ```bash
-sbatch slurm/pi0_fsdp_bench.sbatch      # the memory/throughput sweep across strategies
 sbatch slurm/pi0_full_train.sbatch      # 8 GPUs, full FT to convergence
 ```
 
-`train_pi0_fsdp.py` takes `--finetune full|lora` and `--sharding ddp|no_shard|shard_grad_op|
-full_shard` (the last three are ZeRO-0/2/3 under their torch names). The exported checkpoint
+The exported checkpoint
 is a complete π0 policy directory, so it evaluates through the same script as the adapter:
 
 ```bash
@@ -398,8 +241,6 @@ python scripts/eval_adapter.py --policy $VLA_RUNS/pi0_full/model_best \
   --repeats 5
 ```
 
-**LoRA + DDP remains the production recipe.** Full fine-tuning exists to make the sharding
-measurable and to give the LoRA result something to be compared against — see below.
 
 Iterating locally on one GPU, without SLURM:
 
@@ -409,39 +250,10 @@ python train_pi0.py --max-steps 20 --val-episodes 2 --grad-checkpointing \
   --out $VLA_RUNS/pi0_dev
 ```
 
-Startup logs the effective batch size (per-device × gradient accumulation × world size), which
-is the number that makes runs comparable across different cluster shapes.
 
-## Results so far
 
-π0 + LoRA (r=32, attention targets on the VLM backbone and action expert: 12.65M trainable,
-0.31% of 4.03B) on LIBERO-spatial, 8× A100-40GB:
 
-| metric | value |
-| --- | --- |
-| **LIBERO-spatial success rate** | **54.2% ± 2.2** (271/500 closed-loop episodes) |
-| base π0, zero-shot, same protocol | 0.0% (0/500) |
-| best validation loss | **0.3343 ± 0.0015** (5 seeds) |
-| base π0, same split, no fine-tuning | 0.8719 ± 0.0048 (3 seeds) |
-| throughput | 89.3 samples/s on 8 GPUs (7.0× over 1 GPU, 87% scaling efficiency) |
-| peak VRAM | 11.7 GiB per GPU |
-| wall clock | 67 min for 7 epochs |
-
-Validation loss bottoms out around epoch 5 and then rises while training loss keeps falling —
-12.65M adapter parameters exceed what 392 episodes support. The best checkpoint is measurably
-better than the last (~4σ), which is why best-tracking exists.
-
-### Why sharding is needed at all (Phase 2B)
-
-LoRA fits comfortably on one card, so FSDP would be decoration for that run. Full fine-tuning
-is a different problem. All 4.028B parameters trainable, one A100-40GB, per-device batch 8,
-gradient checkpointing already on:
-
-```
-OOM_EXPECTED finetune=full sharding=ddp world_size=1 per_device_bs=8
-             grad_checkpointing=True peak_vram_gib=37.9 capacity_gib=39.7
-```
-
+### Computational requirements comparison
 fp32 weights (16.1 GiB) and fp32 gradients (16.1 GiB) fill the card before AdamW allocates
 its 32 GiB of moments. FSDP shards the optimizer state and gradients (`shard_grad_op`, the
 ZeRO-2 equivalent) or the parameters as well (`full_shard`, ZeRO-3).
@@ -470,7 +282,7 @@ step and seed, which is the check that sharding changed the memory layout and no
 Three things in that table are worth a second look:
 
 - **ZeRO-3 reaches the same peak as ZeRO-2, not a lower one.** 39% of the model sits in the
-  root FSDP unit — a direct consequence of the wrap constraint below — and stays gathered
+  root FSDP unit — a consequence of the wrap policy below — and stays gathered
   across forward and backward, so ZeRO-3 cannot shard the part that dominates. (This was
   checked against a measurement artefact: the fp32 model is built on the GPU before sharding,
   costing 15.5 GiB, but that is below the reported peaks, so they are genuine training peaks.)
@@ -480,78 +292,23 @@ Three things in that table are worth a second look:
 - **LoRA under FSDP peaks at 11.7 GiB, exactly matching the LoRA+DDP production run** — two
   independent code paths agreeing on the same number.
 
-### What full fine-tuning actually bought
 
-The point of running it to convergence was to replace an assumption with a number. Both
-artefacts were then re-evaluated with one script, one batch size and one set of seeds on the
-same 40 held-out episodes — the two training logs are not directly comparable to each other:
+One finding worth stating plainly: **the textbook FSDP wrap policy does not apply to π0.**
+FSDP gathers a unit's parameters in a pre-forward hook on the wrapped module, but π0 never
+calls its decoder layers' `forward`. It runs its own fused loop (`compute_layer_complete` in
+lerobot's `modeling_pi0.py`) so the VLM prefix and the action expert can share one attention
+op, and calls `layer.input_layernorm`, `layer.self_attn.q_proj/k_proj/v_proj/o_proj` and
+`layer.mlp` directly. A unit wrapped around `GemmaDecoderLayer` would never have its hook
+fire, so its parameters would still be sharded when the loop reads them. We expect this to
+fail loudly (with `use_orig_params=True` the sharded weights have the wrong shape for
+`F.linear`), but we never ran it: the policy was ruled out by reading the code, not by a
+failed job. The policy we use wraps `GemmaMLP` and `SiglipEncoderLayer`, which *are* invoked
+as modules. That covers 2.45B of 4.04B parameters, and the rest falls into the root unit,
+which is still sharded. This is the coarsest correct choice, not the only one: the
+attention projections and layernorms are also called as modules and could be wrapped too,
+which would shrink the root unit. We didn't try that, so the ZeRO-2/ZeRO-3 result above
+reflects this policy and isn't a hard limit of the model. For the same reason we expect
+DeepSpeed ZeRO-3, which hooks every submodule down to each `nn.Linear`, to work on π0. That
+is untested.
 
-| checkpoint | success rate | val loss (n=3) | best at | trainable | artefact | min GPUs |
-| --- | --- | --- | --- | --- | --- | --- |
-| base π0 | 0.0% | 0.8719 ± 0.0048 | — | — | — | — |
-| LoRA `adapter_best` | **54.2% ± 2.2** | **0.3344 ± 0.0020** | epoch 5 of 7 | 12.65M | 49 MB | 1 |
-| full FT `model_best` | **56.6% ± 2.2** | **0.3350 ± 0.0014** | epoch 0 of 5 | 4,028M | 7.6 GB | 4 |
 
-**Two independent metrics agree.** The success-rate gap is +2.4 points with SE 3.1
-(z = 0.76); the val-loss gap is 0.0006, inside the ±0.002 seed noise. Both say
-**statistically indistinguishable**. LoRA reaches the same quality with 0.3% of the trainable
-parameters, a ~160× smaller artefact, and a quarter of the hardware.
-
-They are not the same policy, though. They tie in aggregate while differing per task, with
-two differences surviving Bonferroni across the 10 tasks: task 5 "on the ramekin" (LoRA 30%
-vs full FT 6%, z = −3.29) and task 9 "on the wooden cabinet" (34% vs 62%, z = +2.92). Their
-strengths cancel — something no loss comparison could show.
-
-Success rates come from 500 closed-loop episodes per checkpoint on the standard LIBERO
-protocol (10 tasks × 50 trials from the suite's saved initial states, 280-step cap). **Do not
-read 54.2% against the ~96% published for π0 on LIBERO-spatial**: that is full fine-tuning
-with openpi's recipe, not a 67-minute 12.65M-parameter LoRA. Equally, the 0.0% base row is a
-genuine zero-shot floor — the released `lerobot/pi0` never saw LIBERO — not the paper's
-number.
-
-Full fine-tuning reaches LoRA's quality in a single epoch and then collapses:
-
-| epoch | 0 | 1 | 2 | 3 | 4 |
-| --- | --- | --- | --- | --- | --- |
-| val loss | **0.3344** | 0.3658 | 0.5015 | 0.6869 | 0.8361 |
-| train loss | ~0.35 | ~0.31 | 0.24 | 0.15 | 0.084 |
-
-By epoch 4 the model is back at *base-model* validation quality (0.8361 vs 0.8719 untrained)
-with train loss at 0.084 — catastrophic forgetting, measured rather than asserted. Updating
-all 4.028B parameters buys no generalization over updating 12.65M of them, costs a 7.6 GB
-checkpoint instead of a 49 MB adapter, and needs a minimum of four GPUs where LoRA fits on
-one. **LoRA + DDP remains the production recipe** — now for a measured reason rather than an
-assumed one.
-
-One finding worth stating plainly: **the textbook FSDP wrap policy is wrong for π0.** FSDP
-unshards parameters in a module's pre-forward hook, but π0 never calls its decoder layers'
-`forward` — it hand-rolls a fused loop so the VLM prefix and the action expert can share one
-attention op, reaching into `layer.self_attn.q_proj(...)` directly. Wrapping
-`GemmaDecoderLayer` would build units whose hooks never fire, leaving parameters sharded
-while the math runs: a silent correctness bug rather than a clean failure. The policy wraps
-`GemmaMLP` and `SiglipEncoderLayer` instead, which *are* invoked as modules, covering 2.45B
-of 4.04B parameters; the rest lands in the (still sharded) root unit. The same hook mechanism
-is why DeepSpeed ZeRO-3 cannot be used on this model at all.
-
-## Next steps
-
-`TODO.md` is the authoritative list of what is not done, and **`IMPROVEMENTS.md`** covers
-the gap between our 54.2% and the ~97% published for π0 on LIBERO-spatial — causes, costs
-and ordering. Nothing is blocked: the `$HOME`
-quota is clear and Phase 2B is committed. `CLAUDE.md` has the detailed engineering notes.
-
-**A — Simulator rollouts.** *Done*, see the success rates above. `scripts/eval_libero.py`
-runs the standard LIBERO protocol. The first attempt scored 0% on a known-good checkpoint
-(the post-processor was never given the dataset's normalization stats, so rollouts drove the
-arm with z-scores — a validation loss cannot catch that, because computing one never touches
-the inference path).
-
-**B — Full fine-tuning under FSDP.** *Done*, see `train_pi0_fsdp.py` above.
-
-Remaining: publish `adapter_best/` and `model_best/` to the Hub — cards are written
-(`model_cards/`) and `scripts/publish_to_hub.py` applies them; evaluate both checkpoints on a
-*different* LIBERO suite as an out-of-distribution test (~1 GPU-hour, no retraining, and the
-per-task divergence above makes it a real question); train on all four LIBERO suites (1,693
-episodes vs 392) as the strongest lever against the overfitting; and the untouched
-regularisation knobs (`--weight-decay` is 0.0, `--lr` is 1e-4 against π0's own 2.5e-5
-default).

@@ -52,7 +52,7 @@ def main():
     print(f"LIBERO-{first['suite'].replace('libero_', '')}, "
           f"{first['_n']} episodes ({first['_n'] // 10} trials x 10 tasks), "
           f"n_action_steps={first['n_action_steps']}, {first['max_steps']}-step cap.\n")
-    print("| checkpoint | success rate | successes |")
+    print("| checkpoint | success rate ± SE | successes |")
     print("| --- | --- | --- |")
     for k in keys:
         d = R[k]

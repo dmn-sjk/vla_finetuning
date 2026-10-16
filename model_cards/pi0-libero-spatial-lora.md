@@ -17,14 +17,8 @@ datasets:
 # pi0-libero-spatial-lora
 
 A LoRA adapter that fine-tunes [`lerobot/pi0`](https://huggingface.co/lerobot/pi0) on the
-**LIBERO-spatial** manipulation suite. 12.65M trainable parameters (0.31% of the 4.03B
-base), a 49 MB artefact, trained in 67 minutes on 8x A100-40GB.
-
-| | LIBERO-spatial success rate | validation loss |
-| --- | --- | --- |
-| base `lerobot/pi0`, zero-shot | 0.0% | 0.8719 ± 0.0048 |
-| **this adapter** | **54.2% ± 2.2** | **0.3344 ± 0.0020** |
-| full fine-tune of all 4.03B params | 56.6% ± 2.2 | 0.3350 ± 0.0014 |
+**LIBERO-Spatial** manipulation suite. 12.65M trainable parameters (0.31% of the 4.03B
+base), a 49 MB artefact, trained in 67 minutes on 8x A100-40GB with plain DDP.
 
 ## Model details
 
@@ -51,25 +45,24 @@ base), a 49 MB artefact, trained in 67 minutes on 8x A100-40GB.
 | Precision | bf16 autocast, fp32 master weights |
 | Other | gradient checkpointing on, seed 42 |
 
-Sharding was **not** needed: LoRA fits in 11.7 GiB, so the whole run is DDP. (Full
-fine-tuning of the same model does not fit on fewer than 4 GPUs even with ZeRO-3 — see the
-comparison below.)
 
 ## Results
 
 Two independent measurements, both on held-out data.
 
-### Closed-loop success rate (the metric the literature reports)
+### Closed-loop success rate
 
-500 episodes: all 10 LIBERO-spatial tasks x 50 trials, each trial starting from the suite's
+500 episodes: all 10 LIBERO-Spatial tasks x 50 trials, each trial starting from the suite's
 own *i*-th saved initial state, 280-step cap, `n_action_steps=5`. This is the standard
 LIBERO/OpenVLA evaluation protocol.
 
-| checkpoint | success rate | successes |
+| checkpoint | success rate ± SE | successes |
 | --- | --- | --- |
 | base `lerobot/pi0` (zero-shot) | 0.0% ± 0.0 | 0/500 |
 | **LoRA `adapter_best` (this model)** | **54.2% ± 2.2** | 271/500 |
-| full fine-tune `model_best` | 56.6% ± 2.2 | 283/500 |
+| [full fine-tune `model_best`](https://huggingface.co/dmnsjk/pi0-libero-spatial-full) | 56.6% ± 2.2 | 283/500 |
+
+± is the **binomial standard error** of each rate, √(p(1−p)/n) with n = 500. It measures evaluation noise for this one checkpoint (how much the rate would move on a re-run). For the 0/500 zero-shot row it is 0 by construction. A 95% Wilson interval puts the true rate between 0% and 0.8%.
 
 Per task:
 
@@ -86,40 +79,52 @@ Per task:
 | 8 | next to the plate | 66% | 68% |
 | 9 | on the wooden cabinet | 34% | 62% |
 
+Each per-task rate is from 50 episodes, so it carries a binomial standard error of up to ±7 points. Differences of a few points between tasks or checkpoints are noise.
+
 ### Validation loss
 
-Flow-matching loss on the 40 held-out episodes, re-measured by reloading each artefact
-fresh and averaging 3 seeded passes (pi0 samples a diffusion timestep and noise on every
-forward, so a single number is a stochastic estimate):
+Flow-matching loss on the 40 held-out episodes, re-measured by reloading each artefact fresh and averaging 3 seeded passes (pi0 samples a diffusion timestep and noise on every forward, so a single number is a stochastic estimate):
 
-| checkpoint | val loss (n=3) | trainable params | artefact | min GPUs |
+| checkpoint | val loss (mean ± std, n=3) | trainable params | artefact | min 40GB GPUs |
 | --- | --- | --- | --- | --- |
-| base `lerobot/pi0` | 0.8719 ± 0.0048 | — | — | — |
-| **this adapter** | **0.3344 ± 0.0020** | 12.65M | 49 MB | 1 |
-| full fine-tune | 0.3350 ± 0.0014 | 4,028M | 7.6 GB | 4 |
+| base `lerobot/pi0` (zero-shot) | 0.8719 ± 0.0048 | — | — | — |
+| **LoRA `adapter_best` (this model)** | **0.3344 ± 0.0020** | 12.65M | 49 MB | 1 |
+| [full fine-tune `model_best`](https://huggingface.co/dmnsjk/pi0-libero-spatial-full) | 0.3350 ± 0.0014 | 4,028M | 7.6 GB | 4 |
+
+± is the standard deviation of the 3 passes (dividing by n): the spread of the stochastic estimate for one checkpoint, not variance across training runs.
 
 ### LoRA matches full fine-tuning, on both metrics
 
-The success-rate gap is **+2.4 points with a standard error of 3.1 (z = 0.76)** — not
-significant. The validation-loss gap is 0.0006, inside the ±0.002 seed noise. A LoRA
+Full FT minus LoRA is **+2.4 points of success rate, with a standard error of 3.1 points
+(z = 0.76, two-sided p = 0.45)** — not significant. The standard error of the gap is
+√(SE_LoRA² + SE_full²) = √(2.2² + 2.2²), i.e. an unpooled two-proportion z-test. That test
+treats the two runs as independent. Both actually started from the same 500 initial states;
+a paired McNemar test on the per-episode outcomes (87 episodes only LoRA solved, 99 only full
+FT solved) gives z = 0.88, so the verdict is the same. The
+validation-loss gap is 0.0006, inside the ±0.002 spread between seeded passes. A LoRA
 training 0.31% of the parameters reaches the same quality as fine-tuning all 4.03B, with a
 160x smaller artefact and a quarter of the hardware.
 
+This compares one training run per arm. Training-seed variance was not measured, so the
+result shows these two checkpoints tie. It is suggestive, not proof, that the two methods do.
+
 The two are not, however, the *same* policy. They tie in aggregate while differing sharply
-on individual tasks — two differences survive Bonferroni correction across the 10 tasks:
+on individual tasks. Per-task two-proportion z-tests (50 vs 50 episodes, z = (full FT −
+LoRA) / SE) find two differences that survive Bonferroni correction across the 10 tasks
+(|z| > 2.81, i.e. α = 0.05/10 two-sided):
 task 5 (this adapter 30% vs full FT 6%, z = -3.29) and task 9 (34% vs 62%, z = +2.92). Their
 strengths happen to cancel.
 
 ### How to read these numbers against published results
 
-**Do not compare 54.2% directly to the ~96% reported for pi0 on LIBERO-spatial.** That figure
+**Do not compare 54.2% directly to the ~96% reported for pi0 on LIBERO-Spatial.** That figure
 comes from full fine-tuning with openpi's own recipe and tuning budget. This is a 12.65M
 parameter LoRA trained for 67 minutes on 392 episodes, as the cheap arm of a
 LoRA-vs-full-fine-tuning comparison, not an attempt to reproduce the paper.
 
 Likewise, the 0.0% base row is the honest **zero-shot** floor: `lerobot/pi0` as released was
 never trained on LIBERO and has never seen this embodiment or action space. It is not the
-paper's number and should not be read as one.
+paper's number.
 
 `n_action_steps=5` follows openpi's LIBERO replan interval; it was not tuned for this
 checkpoint and is a plausible lever on the result.
@@ -169,10 +174,6 @@ Note the normalization statistics: they come from the training dataset's `meta.s
 policy deployed with different statistics than it was trained with will produce
 systematically wrong action magnitudes.
 
-If you are rolling this out in simulation, LIBERO's raw camera frames must be **rotated
-180 degrees** before they match the orientation of the training data — robosuite renders
-origin-bottom-left and mirrored. Getting this wrong runs perfectly and scores near zero.
-
 ## Licence and access
 
 - This adapter and its base model `lerobot/pi0` are **Apache-2.0**.
@@ -184,16 +185,12 @@ origin-bottom-left and mirrored. Getting this wrong runs perfectly and scores ne
 
 ## Limitations
 
-- **Single suite.** Trained only on LIBERO-spatial, whose 10 tasks are all "pick up the
-  black bowl ... and place it on the plate" with varying spatial referents. Generalization
-  to other LIBERO suites, other embodiments, or the real world is untested here.
+- **Single suite.** Trained only on LIBERO-Spatial, whose 10 tasks are all "pick up the
+  black bowl ... and place it on the plate" with varying spatial referents. Generalization to other LIBERO suites, other embodiments, or the real world is untested here.
 - **Simulation only.** All numbers are from the LIBERO MuJoCo simulator.
 - **Validation set doubles as the selection set.** The 40 held-out episodes were used both
-  to pick the best epoch and to report validation loss, so the loss figure is mildly
-  selection-biased. The success rates are not affected by this (they are measured on the
-  simulator's own initial-state set, not on dataset episodes).
-- The final-epoch adapter is *worse* than this one and is not published; best-epoch
-  selection is doing real work here.
+  to pick the best epoch and to report validation loss, so the loss figure is mildly selection-biased. The success rates are not affected by this (they are measured on the simulator's own initial-state set, not on dataset episodes).
+- The final-epoch adapter is worse than this one and is not published. Best-epoch selection is doing real work here.
 
 ## Citation
 

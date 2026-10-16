@@ -35,14 +35,18 @@ directly, so the VLM prefix and the action-expert suffix can share one attention
 
 Consequences:
   - the textbook `TRANSFORMER_BASED_WRAP` on `GemmaDecoderLayer` would create units whose
-    hooks never fire, leaving parameters sharded when the math runs — wrong results or a
-    shape error, not a clean failure;
+    hooks never fire, leaving parameters sharded when the fused loop reads them. With
+    use_orig_params=True we expect a shape error in F.linear. Never run: ruled out by
+    reading the code;
   - we wrap `GemmaMLP` and `SiglipEncoderLayer` instead, which *are* invoked as modules
-    (`layer.mlp(...)`, and the vision tower runs a stock HF forward). That covers ~2.4B
-    of 4.03B parameters, and everything left over lives in the root unit;
-  - DeepSpeed ZeRO-3 is unavailable for the same reason (it gathers parameters through
-    module hooks too). ZeRO-2 would work, but FSDP's SHARD_GRAD_OP is the same algorithm
-    without the extra dependency, so that is what we ship.
+    (`layer.mlp(...)`, and the vision tower runs a stock HF forward). That covers ~2.45B
+    of 4.04B parameters, and everything left over lives in the root unit. This is the
+    coarsest correct policy, not the only one: the loop also calls input_layernorm and
+    the q/k/v/o projections as modules, so they could be wrapped too (untried);
+  - DeepSpeed ZeRO-3 hooks every submodule down to each nn.Linear, so its hooks would
+    fire on those projections and we expect it to work here (untested). We use FSDP
+    because it covers ZeRO-2 and ZeRO-3 (SHARD_GRAD_OP / FULL_SHARD) without the extra
+    dependency.
 """
 
 import argparse
