@@ -60,8 +60,8 @@ export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ib0}"
 mkdir -p "$VLA_RUNS" "$WANDB_DIR" logs results
 
 # torchcodec needs FFmpeg 7 shared libs. Where the system has none they come from a
-# micromamba prefix under $VLA_ROOT (see README); NPP is handled in-process by
-# src/runtime.py. A system that ships FFmpeg 7 needs neither.
+# micromamba prefix under $VLA_ROOT (see README). A system that ships FFmpeg 7 does
+# not need it.
 if [ -d "$VLA_FFMPEG_PREFIX/lib" ]; then
   export LD_LIBRARY_PATH="$VLA_FFMPEG_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 elif ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so\.59'; then

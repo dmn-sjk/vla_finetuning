@@ -48,7 +48,6 @@ _LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
 os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", str(_LOCAL_RANK))
 os.environ.setdefault("EGL_DEVICE_ID", str(_LOCAL_RANK))
 
-import train_pi0 as T  # noqa: E402,F401  (runs preload_npp before torchcodec is imported)
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402

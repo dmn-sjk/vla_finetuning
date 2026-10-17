@@ -30,7 +30,6 @@ verified on Athena in job 2948190: 1 GPU, 4 GPUs via torchrun, and resume on bot
 train_pi0.py           # Phase 2 production: pi0 + LoRA, native DDP  <- the production recipe
 train_pi0_fsdp.py      # Phase 2B: pi0 full FT, accelerate + FSDP; also --finetune lora
 src/dist_utils.py      # process group setup, rank gating, count-weighted reductions
-src/runtime.py         # preload_npp() — must run before any torchcodec import
 src/paths.py           # $VLA_ROOT / $VLA_RUNS resolution, shared with the shell
 scripts/verify_env.py  # checks torch/torchvision/torchcodec/lerobot/peft on a compute node
 scripts/eval_adapter.py# seeded, repeated val loss for an adapter *or* a full checkpoint
@@ -778,10 +777,10 @@ directory, which lives in the 10 GB home. Add or change a dependency with `uv ad
 edit `pyproject.toml` then `uv lock`; never hand-install into the venv, or the lock drifts.
 
 Installed and verified (Python 3.12.12): torch 2.11.0+cu128, torchvision 0.26.0+cu128,
-torchcodec 0.11.1+cu128, transformers 5.5.4, accelerate 1.14.0, peft 0.20.0, lerobot 0.6.1,
+torchcodec 0.11.1 (CPU build, from PyPI), transformers 5.5.4, accelerate 1.14.0, peft 0.20.0, lerobot 0.6.1,
 scipy 1.18.0, numpy 2.2.6. Verify with `python scripts/verify_env.py` **on a compute node**.
 
-Four pins in `pyproject.toml` are load-bearing and are commented there — don't "simplify" them:
+Three pins in `pyproject.toml` are load-bearing and are commented there — don't "simplify" them:
 
 - **lerobot 0.6.x, not 0.4.x.** Two separate reasons, either alone sufficient:
   (a) lerobot fetches hub datasets by *git tag matching its own `CODEBASE_VERSION`*, not from
@@ -793,12 +792,17 @@ Four pins in `pyproject.toml` are load-bearing and are commented there — don't
 - **cu128.** lerobot 0.6.1 caps `torch<2.12` and `torchcodec<0.12`; cu128 carries torch 2.11 /
   torchvision 0.26 / torchcodec 0.11. A100 (sm_80) is fully supported on CUDA 12.8.
   (An earlier cu130 stack existed for lerobot 0.3.2 — that is history, don't restore it.)
-- **torch, torchvision and torchcodec all come from the same index.** A PyPI torchvision
-  against an index torch fails at import with `operator torchvision::nms does not exist`.
-- **`nvidia-npp-cu12`.** torchcodec links NVIDIA NPP (`libnppicc.so.12`) for GPU colour
-  conversion; torch does not ship NPP. Without it every `libtorchcodec_core*.so` fails to
-  dlopen. `src/runtime.py:preload_npp()` loads it `RTLD_GLOBAL` — **entrypoints must call it
-  before importing lerobot or torchcodec**.
+- **torch and torchvision come from the cu128 index; torchcodec deliberately does not.** A
+  PyPI torchvision against an index torch fails at import with `operator torchvision::nms
+  does not exist`. torchcodec is the opposite case: its cu128 build links NVIDIA NPP
+  (`libnppicc.so.12`) for GPU colour conversion, which torch does not ship, so every
+  `libtorchcodec_core*.so` fails to dlopen. lerobot 0.6.1 only decodes on CPU
+  (`VideoDecoder(file_handle, seek_mode="approximate")`, no `device`, in
+  `datasets/video_utils.py`), so the PyPI CPU build, which links only libtorch and FFmpeg,
+  is the right one. Verified on 2026-10-17 off-cluster: it loads against torch
+  2.11.0+cu128 and decodes `lerobot/pusht` through DataLoader workers. Moving it back to
+  the CUDA index brings back the NPP failure. (Earlier versions shipped `nvidia-npp-cu12`
+  plus a ctypes `RTLD_GLOBAL` preload; see git history.)
 
 Never use `--torch-backend=auto`: it resolves against the *login* node, which has no GPU
 driver, and silently installs the CPU build. The explicit index in `pyproject.toml` avoids

@@ -18,7 +18,6 @@ This is a code that was used to finetune the two $\pi_{0}$ weight checkpoints on
 train_pi0.py                         # Phase 2 entrypoint: pi0 + LoRA on LIBERO, native DDP
 train_pi0_fsdp.py                    # Phase 2B entrypoint: pi0 full FT under FSDP, via accelerate
 src/dist_utils.py                    # process group setup, rank gating, cross-rank reductions
-src/runtime.py                       # native-library preloading (NPP) needed before torchcodec
 src/paths.py                         # $VLA_ROOT / $VLA_RUNS resolution, shared with the shell
 scripts/verify_env.py                # checks the pieces that have historically broken here
 scripts/eval_adapter.py              # seeded, repeated val loss for an adapter or a full checkpoint
@@ -67,10 +66,6 @@ uv sync
 See [Where things are configured](#where-things-are-configured) below for the full resolution order.
 
 
-
-
-
-
 2.**If your system already provides FFmpeg 7 shared libraries, this step is unnecessary.** `lerobot` decodes trajectory video through `torchcodec`, which needs FFmpeg shared
 libraries. torchcodec's own
 documentation recommends conda-forge; `micromamba` is a fast single-binary client for it:
@@ -87,14 +82,6 @@ system provides FFmpeg 7):
 export LD_LIBRARY_PATH=$VLA_FFMPEG_PREFIX/lib:${LD_LIBRARY_PATH:-}
 ```
 
-
-torchcodec also links **NVIDIA NPP** (`libnppicc.so.12`) for GPU colour conversion, which
-torch does not ship — it has no use for it. The `nvidia-npp-cu12` wheel is therefore a
-direct dependency, and `src/runtime.py:preload_npp()` loads it `RTLD_GLOBAL` before
-torchcodec is imported. That keeps the fix inside the process rather than requiring another
-`LD_LIBRARY_PATH` entry, so **entrypoints must call `preload_npp()` before importing
-`lerobot` or `torchcodec`**.
- TODO
 
 3.Code reads HF and WANDB credentials from a `.env` file in the repository root. Login to those services separately using CLI or use the `.env`:
 ```bash

@@ -13,31 +13,24 @@ import argparse
 import contextlib
 import os
 import shutil
-import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from src.runtime import preload_npp  # noqa: E402
+import torch
+import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
 
-# Must precede any torchcodec import; lerobot pulls torchcodec in transitively.
-preload_npp()
-
-import torch  # noqa: E402
-import torch.nn as nn  # noqa: E402
-from torch.nn.parallel import DistributedDataParallel as DDP  # noqa: E402
-from torch.utils.data import DataLoader, DistributedSampler  # noqa: E402
-
-from lerobot.datasets.factory import resolve_delta_timestamps  # noqa: E402
-from lerobot.datasets.lerobot_dataset import (  # noqa: E402
+from lerobot.datasets.factory import resolve_delta_timestamps
+from lerobot.datasets.lerobot_dataset import (
     LeRobotDataset,
     LeRobotDatasetMetadata,
 )
-from lerobot.policies.factory import make_policy, make_pre_post_processors  # noqa: E402
-from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
+from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.policies.pi0.configuration_pi0 import PI0Config
 
-from src import dist_utils as D  # noqa: E402
-from src.paths import run_dir  # noqa: E402
+from src import dist_utils as D
+from src.paths import run_dir
 
 
 # pi0's Linear modules fall into four groups (names dumped from the loaded model):

@@ -30,12 +30,10 @@ dependencies = [
     "torchvision>=0.26,<0.27",
     # lerobot's video decoder. Needs FFmpeg shared libraries at runtime, which Athena
     # does not provide — see README for the micromamba prefix that supplies them.
+    # Deliberately the PyPI (CPU) build, unlike torch: the cu128 build links NVIDIA NPP
+    # (libnppicc.so.12) for GPU decoding, which torch does not ship, so it fails to
+    # dlopen. lerobot only ever decodes on CPU, so the GPU build buys nothing.
     "torchcodec>=0.11,<0.12",
-    # torchcodec links NVIDIA NPP (libnppicc.so.12) for GPU colour conversion, but torch
-    # does not ship NPP — it has no use for it. Without this wheel every
-    # libtorchcodec_core*.so fails to dlopen and video decoding dies at the first frame.
-    # 12.3.x is the NPP series that ships with CUDA 12.8, matching the index.
-    "nvidia-npp-cu12>=12.3.3,<12.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "numpy>=2.0",
 ]
 
@@ -48,8 +46,9 @@ package = false
 # installs the CPU build. Non-Linux (e.g. a laptop) falls back to plain PyPI.
 #
 # cu128: lerobot 0.6.1 caps torch<2.12 and torchcodec<0.12, and cu128 carries
-# torch 2.11 / torchvision 0.26 / torchcodec 0.11 — so the whole stack stays on one
-# index and one CUDA major. A100 (sm_80) is fully supported on CUDA 12.8.
+# torch 2.11 / torchvision 0.26 — so both stay on one index and one CUDA major.
+# torchcodec is left on PyPI on purpose; see its dependency comment above.
+# A100 (sm_80) is fully supported on CUDA 12.8.
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
@@ -58,4 +57,3 @@ explicit = true
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
-torchcodec = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]

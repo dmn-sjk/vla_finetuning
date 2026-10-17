@@ -54,27 +54,22 @@ import contextlib
 import math
 import os
 import shutil
-import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Imports train_pi0 for the dataset split, the loaders and evaluate().
+import train_pi0 as T
 
-# Imports train_pi0 for the dataset split, the loaders and evaluate(). Importing it also
-# runs preload_npp() at module level, which must happen before torchcodec is pulled in —
-# scripts/eval_adapter.py depends on the same ordering.
-import train_pi0 as T  # noqa: E402
+import torch
+from accelerate import Accelerator
+from accelerate.utils import DistributedType, FullyShardedDataParallelPlugin
 
-import torch  # noqa: E402
-from accelerate import Accelerator  # noqa: E402
-from accelerate.utils import DistributedType, FullyShardedDataParallelPlugin  # noqa: E402
+from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.policies.pi0.configuration_pi0 import PI0Config
 
-from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # noqa: E402
-from lerobot.policies.factory import make_policy, make_pre_post_processors  # noqa: E402
-from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
-
-from src import dist_utils as D  # noqa: E402
-from src.paths import run_dir  # noqa: E402
+from src import dist_utils as D
+from src.paths import run_dir
 
 # Matched by class *name* rather than by class object: no import from transformers'
 # private module layout, and the policy stays readable in a log line. See the module

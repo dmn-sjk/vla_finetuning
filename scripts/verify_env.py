@@ -30,7 +30,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.paths import ffmpeg_prefix  # noqa: E402
-from src.runtime import preload_npp  # noqa: E402  (must precede torchcodec import)
 
 FAILURES: list[str] = []
 
@@ -93,7 +92,6 @@ def _tv():
 
 @check("torchcodec + FFmpeg shared libs")
 def _tc():
-    print(f"    NPP preloaded: {preload_npp()}")
     import torchcodec
     from torchcodec.decoders import VideoDecoder
     print(f"    torchcodec {torchcodec.__version__}")

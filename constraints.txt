@@ -11,7 +11,7 @@
 # "Installing the sim stack (the egl-probe wall)" for why each step is needed.
 torch==2.11.0+cu128
 torchvision==0.26.0+cu128
-torchcodec==0.11.1+cu128
+torchcodec==0.11.1
 transformers==5.5.4
 numpy==2.2.6
 lerobot==0.6.1

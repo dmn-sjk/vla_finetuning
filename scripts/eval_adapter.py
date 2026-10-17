@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import train_pi0 as T  # noqa: E402  (runs preload_npp before torchcodec is imported)
+import train_pi0 as T  # noqa: E402
 import torch  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
