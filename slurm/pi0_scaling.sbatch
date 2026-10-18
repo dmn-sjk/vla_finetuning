@@ -39,4 +39,4 @@ for N in 1 2 4; do
 done
 
 echo "=================== summary ==================="
-grep -h "^THROUGHPUT" "logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out" || true
+grep -h "^THROUGHPUT" logs/*-"$SLURM_JOB_ID".out || true

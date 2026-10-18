@@ -1,14 +1,8 @@
-# Pins for installing the LIBERO simulator stack into an existing training venv.
-#
-# `hf-libero` drags in robosuite/robomimic/mujoco, an ecosystem old enough that its
-# resolver will happily downgrade numpy or pull a PyPI (CPU) torch over the cu128 one.
-# Passing this with `uv pip install -c constraints.txt` keeps the install additive:
-# nothing already present is removed or downgraded. Verify with a `uv pip freeze` diff.
-# (robosuite's GUI `opencv-python` is the one exception, and is uninstalled again on
-# purpose -- it clobbers the headless cv2. See the README.)
-#
-# See README, "Simulator, for evaluation only" for the recipe; CLAUDE.md,
-# "Installing the sim stack (the egl-probe wall)" for why each step is needed.
+# Pins for installing the LIBERO simulator stack into an existing training venv:
+#   uv pip install -c constraints.txt ...
+# Keeps the install additive (no numpy downgrade, no PyPI CPU torch). The one intended
+# exception is robosuite's GUI opencv-python, uninstalled afterwards. Recipe: README,
+# "Simulator (evaluation only)".
 torch==2.11.0+cu128
 torchvision==0.26.0+cu128
 torchcodec==0.11.1

@@ -133,14 +133,12 @@ def load_policy(args, device, stats_meta):
 
 def _assert_unnormalizes(postprocessor, stats_meta, cfg, args):
     """Check the postprocessor maps a zero action to the dataset action mean (MEAN_STD)."""
-    import numpy as _np
-
-    mean = _np.asarray(stats_meta.stats["action"]["mean"], dtype=_np.float32)
+    mean = np.asarray(stats_meta.stats["action"]["mean"], dtype=np.float32)
     dim = cfg.output_features[ACTION].shape[0]
     got = postprocessor(torch.zeros(1, cfg.chunk_size, dim)).float().cpu().numpy()[0, 0]
     if args.checkpoint_stats:
         # the checkpoint's stats need not match --dataset's; require only that it unnormalizes
-        if not _np.isfinite(got).all() or _np.allclose(got, 0.0, atol=1e-6):
+        if not np.isfinite(got).all() or np.allclose(got, 0.0, atol=1e-6):
             raise RuntimeError(
                 f"post-processor is not unnormalizing: unnormalize(0) returned {got.round(4)}. "
                 "The checkpoint appears to ship no action stats; drop --checkpoint-stats."
@@ -149,7 +147,7 @@ def _assert_unnormalizes(postprocessor, stats_meta, cfg, args):
             f"unnormalize(0) = {got.round(4)} (checkpoint's own stats); "
             f"{args.dataset} action mean = {mean[:dim].round(4)}"
         )
-    elif not _np.allclose(got, mean[:dim], atol=1e-3):
+    elif not np.allclose(got, mean[:dim], atol=1e-3):
         raise RuntimeError(
             "post-processor is not unnormalizing actions: unnormalize(0) returned "
             f"{got.round(4)}, expected the dataset action mean {mean[:dim].round(4)}. "

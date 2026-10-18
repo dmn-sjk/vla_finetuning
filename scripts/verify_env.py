@@ -64,7 +64,8 @@ def check_cv2():
 def check_libero():
     if importlib.util.find_spec("libero") is None:
         return None
-    cfg = Path(os.environ.get("LIBERO_CONFIG_PATH", "$LIBERO_CONFIG_PATH"), "config.yaml")
+    assert "LIBERO_CONFIG_PATH" in os.environ, "LIBERO_CONFIG_PATH is not set; see README"
+    cfg = Path(os.environ["LIBERO_CONFIG_PATH"], "config.yaml")
     assert cfg.is_file(), f"no {cfg}: importing libero would block on input(); see README"
     os.environ.setdefault("MUJOCO_GL", "egl")
     from libero.libero import benchmark
@@ -93,7 +94,10 @@ if __name__ == "__main__":
     for name, fn, optional in CHECKS:
         try:
             info = fn()
-            print(f"ABSENT  {name}" if optional and info is None else f"OK      {name}: {info}")
+            if optional and info is None:
+                print(f"ABSENT  {name}")
+            else:
+                print(f"OK      {name}: {info}")
         except Exception:
             failed.append(name)
             print(f"FAIL    {name}\n{traceback.format_exc(limit=3)}")

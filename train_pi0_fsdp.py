@@ -181,7 +181,7 @@ class TrainContext:
     setup_peak: float
 
 
-def save_state(accelerator, args, path: Path):
+def save_state(accelerator, path: Path):
     """Sharded checkpoint written beside the target, then swapped in by rank 0."""
     tmp = path.with_name(path.name + ".tmp")
     if accelerator.is_main_process:
@@ -362,112 +362,123 @@ def main():
 
 
 def train(ctx: TrainContext):
-    args, accelerator, policy, device = ctx.args, ctx.accelerator, ctx.policy, ctx.device
-    state, optimizer, scheduler, run = ctx.state, ctx.optimizer, ctx.scheduler, ctx.run
-    preprocessor = ctx.preprocessor
-    policy.train()
+    ctx.policy.train()
     stop = False
     # time training segments only, excluding val and checkpoint writes
-    timer, timed_peak = ThroughputTimer(device, accelerator.wait_for_everyone), 0.0
-    trainable = [p for p in policy.parameters() if p.requires_grad]
+    timer, timed_peak = ThroughputTimer(ctx.device, ctx.accelerator.wait_for_everyone), 0.0
+    trainable = [p for p in ctx.policy.parameters() if p.requires_grad]
 
-    for epoch in range(state.epoch, args.epochs):
+    for epoch in range(ctx.state.epoch, ctx.args.epochs):
         if ctx.train_sampler is not None:
             ctx.train_sampler.set_epoch(epoch)
         timer.resume()
 
         t0, running, seen = time.time(), 0.0, 0
         for i, raw in enumerate(ctx.train_loader):
-            batch = preprocessor(raw)
-            with accelerator.autocast():
-                loss, _ = policy(batch)
+            batch = ctx.preprocessor(raw)
+            with ctx.accelerator.autocast():
+                loss, _ = ctx.policy(batch)
             # no no_sync: it keeps unsharded grads resident
-            accelerator.backward(loss / args.grad_accum)
+            ctx.accelerator.backward(loss / ctx.args.grad_accum)
 
             running += loss.item()
             seen += 1
-            timer.add(args.batch_size * accelerator.num_processes)
+            timer.add(ctx.args.batch_size * ctx.accelerator.num_processes)
 
-            if (i + 1) % args.grad_accum == 0:
-                if args.grad_clip > 0:
+            if (i + 1) % ctx.args.grad_accum == 0:
+                if ctx.args.grad_clip > 0:
                     # accelerate routes to FSDP's sharded clip_grad_norm_
-                    accelerator.clip_grad_norm_(trainable, args.grad_clip)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-                state.global_step += 1
+                    ctx.accelerator.clip_grad_norm_(trainable, ctx.args.grad_clip)
+                ctx.optimizer.step()
+                ctx.scheduler.step()
+                ctx.optimizer.zero_grad(set_to_none=True)
+                ctx.state.global_step += 1
 
-                if state.global_step == args.warmup_steps and not timer.started:
+                if ctx.state.global_step == ctx.args.warmup_steps and not timer.started:
                     timer.start()
 
-                if state.global_step % args.log_every == 0:
+                if ctx.state.global_step % ctx.args.log_every == 0:
                     avg = running / max(seen, 1)
-                    vram = D.peak_vram_gib(device)
+                    vram = D.peak_vram_gib(ctx.device)
                     D.print0(
-                        f"epoch {epoch} step {state.global_step} loss {avg:.4f} "
-                        f"lr {scheduler.get_last_lr()[0]:.2e} peak_vram {vram:.1f}GiB"
+                        f"epoch {epoch} step {ctx.state.global_step} loss {avg:.4f} "
+                        f"lr {ctx.scheduler.get_last_lr()[0]:.2e} peak_vram {vram:.1f}GiB"
                     )
-                    if run is not None:
-                        run.log(
+                    if ctx.run is not None:
+                        ctx.run.log(
                             {
                                 "train/loss": avg,
                                 "epoch": epoch,
                                 "vram_gib": vram,
-                                "lr": scheduler.get_last_lr()[0],
+                                "lr": ctx.scheduler.get_last_lr()[0],
                             },
-                            step=state.global_step,
+                            step=ctx.state.global_step,
                         )
                     running, seen = 0.0, 0
 
-                if args.max_steps and state.global_step >= args.max_steps:
+                if ctx.args.max_steps and ctx.state.global_step >= ctx.args.max_steps:
                     stop = True
                     break
 
         if timer.running:
             timer.pause()
             # read before export, which gathers full parameters on the GPU
-            timed_peak = D.peak_vram_gib(device)
+            timed_peak = D.peak_vram_gib(ctx.device)
 
         # accelerate already wraps the forward in autocast
-        val_loss = evaluate(policy, ctx.val_loader, preprocessor, autocast_ctx(False), device)
-        is_best = val_loss < state.best_val
-        state.best_val = min(state.best_val, val_loss)
-        state.epoch = epoch + 1
+        val_loss = evaluate(
+            ctx.policy, ctx.val_loader, ctx.preprocessor, autocast_ctx(False), ctx.device
+        )
+        is_best = val_loss < ctx.state.best_val
+        ctx.state.best_val = min(ctx.state.best_val, val_loss)
+        ctx.state.epoch = epoch + 1
         D.print0(
             f"epoch {epoch} done in {time.time() - t0:.1f}s val_loss {val_loss:.4f}"
-            f"{' (best)' if is_best else f' (best {state.best_val:.4f})'}"
+            f"{' (best)' if is_best else f' (best {ctx.state.best_val:.4f})'}"
         )
-        if run is not None:
-            run.log(
-                {"val/loss": val_loss, "val/best_loss": state.best_val, "epoch": epoch},
-                step=state.global_step,
+        if ctx.run is not None:
+            ctx.run.log(
+                {"val/loss": val_loss, "val/best_loss": ctx.state.best_val, "epoch": epoch},
+                step=ctx.state.global_step,
             )
 
-        if not args.no_checkpoint:
-            save_state(accelerator, args, ctx.ckpt_dir)
+        if not ctx.args.no_checkpoint:
+            save_state(ctx.accelerator, ctx.ckpt_dir)
         if is_best:
             export_model(
-                accelerator, args, policy, preprocessor, ctx.postprocessor, args.out / "model_best"
+                ctx.accelerator,
+                ctx.args,
+                ctx.policy,
+                ctx.preprocessor,
+                ctx.postprocessor,
+                ctx.args.out / "model_best",
             )
         if stop:
-            D.print0(f"stopping at max_steps={args.max_steps}")
+            D.print0(f"stopping at max_steps={ctx.args.max_steps}")
             break
 
     if timer.started and timer.elapsed > 0:
         D.print0(
-            f"THROUGHPUT finetune={args.finetune} sharding={args.sharding} "
-            f"world_size={accelerator.num_processes} per_device_bs={args.batch_size} "
-            f"grad_accum={args.grad_accum} effective_batch={ctx.effective_batch} "
-            f"grad_checkpointing={args.grad_checkpointing} "
+            f"THROUGHPUT finetune={ctx.args.finetune} sharding={ctx.args.sharding} "
+            f"world_size={ctx.accelerator.num_processes} per_device_bs={ctx.args.batch_size} "
+            f"grad_accum={ctx.args.grad_accum} effective_batch={ctx.effective_batch} "
+            f"grad_checkpointing={ctx.args.grad_checkpointing} "
             f"samples_per_s={timer.samples_per_s:.1f} "
             f"elapsed_s={timer.elapsed:.1f} peak_vram_gib={timed_peak:.1f} "
             f"setup_peak_gib={ctx.setup_peak:.1f}"
         )
 
-    export_model(accelerator, args, policy, preprocessor, ctx.postprocessor, args.out / "model")
+    export_model(
+        ctx.accelerator,
+        ctx.args,
+        ctx.policy,
+        ctx.preprocessor,
+        ctx.postprocessor,
+        ctx.args.out / "model",
+    )
     D.print0(
-        f"best val_loss {state.best_val:.4f}; "
-        f"{args.out / 'model_best'} is the checkpoint to publish"
+        f"best val_loss {ctx.state.best_val:.4f}; "
+        f"{ctx.args.out / 'model_best'} is the checkpoint to publish"
     )
 
 

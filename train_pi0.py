@@ -87,7 +87,7 @@ def save_checkpoint(
 def load_checkpoint(path: Path, policy, optimizer, device):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     raw = policy.module if isinstance(policy, DDP) else policy
-    missing, unexpected = raw.load_state_dict(ckpt["lora"], strict=False)
+    _, unexpected = raw.load_state_dict(ckpt["lora"], strict=False)
     if unexpected:
         raise RuntimeError(
             f"checkpoint has {len(unexpected)} unexpected keys, e.g. {unexpected[:3]}"
