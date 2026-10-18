@@ -16,7 +16,7 @@ source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
 export NCCL_DEBUG=INFO             # drop to WARN once the run is stable
 
-# Measured on one A100-40GB (see CLAUDE.md): at per-device batch 8, peak VRAM is
+# Measured on one A100-40GB (see docs/notes.md): at per-device batch 8, peak VRAM is
 # 9.8 GiB with gradient checkpointing and 21.6 GiB without. Batch 16 + checkpointing
 # therefore sits around 12 GiB, well inside 40 GB, and gives an effective batch of
 # 16 x 2 x 8 = 256 — the batch size the pi0 paper trains at.

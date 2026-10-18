@@ -36,10 +36,8 @@ slurm/pi0_libero_reference.sbatch    # lerobot's own LIBERO-finetuned pi0 throug
 results/                             # per-episode rollout records behind the published success rates
 model_cards/                         # the Hub READMEs of both published checkpoints
 checkpoints.sha256                   # hashes of the archived checkpoints that were evaluated
-TODO.md                              # what is NOT done, in dependency order
 IMPROVEMENTS.md                      # the gap to published pi0 LIBERO numbers: causes, costs, order
-CLAUDE.md                            # detailed engineering notes
-md_files/PROJECT.md                  # original project brief
+docs/notes.md                        # technical notes: non-obvious constraints, measured results
 pyproject.toml                       # dependencies + CUDA wheel index pins
 uv.lock                              # exact pinned versions
 constraints.txt                      # pins for installing the LIBERO simulator into the venv
