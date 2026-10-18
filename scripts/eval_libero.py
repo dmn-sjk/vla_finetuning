@@ -15,7 +15,6 @@ import sys
 from collections import defaultdict
 from datetime import timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -28,7 +27,6 @@ os.environ.setdefault("EGL_DEVICE_ID", str(_LOCAL_RANK))
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
-
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # noqa: E402
 from lerobot.policies.factory import make_policy, make_pre_post_processors  # noqa: E402
 from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
@@ -163,7 +161,7 @@ def load_policy(args, device, stats_meta):
         cams.append((key, CAMERA_ALIASES[key]))
     if not cams:
         raise RuntimeError(f"no usable camera inputs resolved from {list(cfg.image_features)}")
-    print(f"camera wiring: " + ", ".join(f"{r} -> {k}" for k, r in cams))
+    print("camera wiring: " + ", ".join(f"{r} -> {k}" for k, r in cams))
     return policy, cfg, preprocessor, postprocessor, cams
 
 
@@ -207,8 +205,8 @@ def make_env(bddl_file, resolution):
 
 def verify_obs(args, device):
     """Compare env frames against real dataset frames under each candidate flip."""
-    from libero.libero import benchmark, get_libero_path
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from libero.libero import benchmark, get_libero_path
 
     suite = benchmark.get_benchmark_dict()[args.suite]()
     task = suite.get_task(0)
@@ -284,7 +282,8 @@ def rollout_batch(policy, preprocessor, postprocessor, envs, instructions, max_s
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--adapter", type=Path, default=None, help="PEFT adapter dir; omit for a full checkpoint")
+    p.add_argument("--adapter", type=Path, default=None,
+                   help="PEFT adapter dir; omit for a full checkpoint")
     p.add_argument("--policy", default="lerobot/pi0", help="base weights or a full fine-tuned dir")
     p.add_argument("--suite", default="libero_spatial")
     p.add_argument("--dataset", default="lerobot/libero_spatial_image",
@@ -357,10 +356,10 @@ def main():
     for tid, eps in sorted(by_task.items()):
         task = suite.get_task(tid)
         bddl = os.path.join(get_libero_path("bddl_files"), task.problem_folder, task.bddl_file)
-        init_states = torch.load(
-            os.path.join(get_libero_path("init_states"), task.problem_folder, task.init_states_file),
-            weights_only=False,
+        init_path = os.path.join(
+            get_libero_path("init_states"), task.problem_folder, task.init_states_file
         )
+        init_states = torch.load(init_path, weights_only=False)
         pool = [make_env(bddl, args.resolution) for _ in range(min(args.envs_per_rank, len(eps)))]
         try:
             for i in range(0, len(eps), len(pool)):
@@ -371,8 +370,10 @@ def main():
                     [task.language] * len(chunk), max_steps, transform, device, autocast_ctx,
                     cams,
                 )
-                for ep, s, st in zip(chunk, succ, steps):
-                    results.append({"task_id": tid, "episode": ep, "success": bool(s), "steps": int(st)})
+                for ep, s, st in zip(chunk, succ, steps, strict=True):
+                    results.append(
+                        {"task_id": tid, "episode": ep, "success": bool(s), "steps": int(st)}
+                    )
                 nd = sum(r["success"] for r in results)
                 print(f"[rank {R.rank}] task {tid} {i + len(chunk)}/{len(eps)} "
                       f"running {nd}/{len(results)}", flush=True)

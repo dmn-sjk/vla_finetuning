@@ -54,7 +54,7 @@ def check(name: str):
         print(f"\n=== {name}")
         try:
             fn()
-            print(f"    OK")
+            print("    OK")
         except Absent as e:
             print(f"    ABSENT: {e}")
         except Exception:
@@ -81,7 +81,8 @@ def _torch():
 
 @check("torchvision C++ ops")
 def _tv():
-    import torch, torchvision
+    import torch
+    import torchvision
     from torchvision.ops import nms
     print(f"    torchvision {torchvision.__version__}")
     boxes = torch.tensor([[0.0, 0.0, 1.0, 1.0], [0.1, 0.1, 1.0, 1.0]])
@@ -121,8 +122,9 @@ def _tc():
 
 @check("lerobot pi0 policy")
 def _lerobot():
-    from lerobot.policies.pi0.modeling_pi0 import PI0Policy  # noqa: F401
     import importlib.metadata as md
+
+    from lerobot.policies.pi0.modeling_pi0 import PI0Policy  # noqa: F401
 
     # CODEBASE_VERSION lives in lerobot_dataset on 0.4.x and dataset_metadata on 0.6.x.
     try:
@@ -139,9 +141,9 @@ def _lerobot():
 
 @check("peft LoRA")
 def _peft():
-    import peft
-    from peft import LoraConfig, get_peft_model
     import importlib.metadata as md
+
+    from peft import LoraConfig
     print(f"    peft {md.version('peft')}")
     LoraConfig(r=8, lora_alpha=16, target_modules=["q_proj"])
 

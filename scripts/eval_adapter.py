@@ -15,13 +15,13 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import train_pi0 as T  # noqa: E402
 import torch  # noqa: E402
-from torch.utils.data import DataLoader  # noqa: E402
-
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # noqa: E402
 from lerobot.policies.factory import make_policy, make_pre_post_processors  # noqa: E402
 from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
+from torch.utils.data import DataLoader  # noqa: E402
+
+import train_pi0 as T  # noqa: E402
 
 
 def main():

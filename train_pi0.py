@@ -9,9 +9,6 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
-
 from lerobot.datasets.factory import resolve_delta_timestamps
 from lerobot.datasets.lerobot_dataset import (
     LeRobotDataset,
@@ -19,10 +16,11 @@ from lerobot.datasets.lerobot_dataset import (
 )
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
 
 from src import dist_utils as D
 from src.paths import run_dir
-
 
 # PEFT fullmatches a string target_modules against the module path, hence the `.*` anchors.
 # The vision tower is excluded on purpose: SigLIP features transfer well and are easy to damage.
@@ -162,7 +160,9 @@ def load_checkpoint(path: Path, policy, optimizer, device):
     raw = policy.module if isinstance(policy, DDP) else policy
     missing, unexpected = raw.load_state_dict(ckpt["lora"], strict=False)
     if unexpected:
-        raise RuntimeError(f"checkpoint has {len(unexpected)} unexpected keys, e.g. {unexpected[:3]}")
+        raise RuntimeError(
+            f"checkpoint has {len(unexpected)} unexpected keys, e.g. {unexpected[:3]}"
+        )
     optimizer.load_state_dict(ckpt["optimizer"])
     # keep best_val across resume so a worse epoch cannot overwrite adapter_best
     return ckpt["epoch"], ckpt["global_step"], ckpt.get("best_val", float("inf"))
@@ -304,7 +304,8 @@ def main():
             is_accum = (i + 1) % args.grad_accum != 0
 
             # skip all-reduce on accumulation micro-batches
-            sync_ctx = policy.no_sync if (isinstance(policy, DDP) and is_accum) else contextlib.nullcontext
+            use_no_sync = isinstance(policy, DDP) and is_accum
+            sync_ctx = policy.no_sync if use_no_sync else contextlib.nullcontext
             with sync_ctx():
                 with autocast_ctx():
                     loss, _ = policy(batch)
@@ -329,7 +330,8 @@ def main():
 
                 if global_step % args.log_every == 0:
                     avg = running / max(seen, 1)
-                    vram = torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0
+                    cuda = device.type == "cuda"
+                    vram = torch.cuda.max_memory_allocated() / 2**30 if cuda else 0.0
                     D.print0(
                         f"epoch {epoch} step {global_step} loss {avg:.4f} peak_vram {vram:.1f}GiB"
                     )

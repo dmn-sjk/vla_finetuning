@@ -12,16 +12,14 @@ import shutil
 import time
 from pathlib import Path
 
-import train_pi0 as T
-
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedType, FullyShardedDataParallelPlugin
-
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
 
+import train_pi0 as T
 from src import dist_utils as D
 from src.paths import run_dir
 
@@ -368,7 +366,8 @@ def train(args, accelerator, policy, optimizer, scheduler, state, preprocessor,
 
                 if state.global_step % args.log_every == 0:
                     avg = running / max(seen, 1)
-                    vram = torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0
+                    cuda = device.type == "cuda"
+                    vram = torch.cuda.max_memory_allocated() / 2**30 if cuda else 0.0
                     D.print0(
                         f"epoch {epoch} step {state.global_step} loss {avg:.4f} "
                         f"lr {scheduler.get_last_lr()[0]:.2e} peak_vram {vram:.1f}GiB"
