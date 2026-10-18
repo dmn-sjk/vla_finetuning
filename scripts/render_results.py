@@ -46,15 +46,19 @@ def main():
         return
 
     first = R[keys[0]]
-    print(f"LIBERO-{first['suite'].replace('libero_', '')}, "
-          f"{first['_n']} episodes ({first['_n'] // 10} trials x 10 tasks), "
-          f"n_action_steps={first['n_action_steps']}, {first['max_steps']}-step cap.\n")
+    print(
+        f"LIBERO-{first['suite'].replace('libero_', '')}, "
+        f"{first['_n']} episodes ({first['_n'] // 10} trials x 10 tasks), "
+        f"n_action_steps={first['n_action_steps']}, {first['max_steps']}-step cap.\n"
+    )
     print("| checkpoint | success rate ± SE | successes |")
     print("| --- | --- | --- |")
     for k in keys:
         d = R[k]
-        print(f"| {LABELS.get(k, k)} | **{d['_rate'] * 100:.1f}% ± {d['_se'] * 100:.1f}** "
-              f"| {round(d['_rate'] * d['_n'])}/{d['_n']} |")
+        print(
+            f"| {LABELS.get(k, k)} | **{d['_rate'] * 100:.1f}% ± {d['_se'] * 100:.1f}** "
+            f"| {round(d['_rate'] * d['_n'])}/{d['_n']} |"
+        )
 
     print("\n### Per task\n")
     tids = sorted({t for d in R.values() for t in d["per_task"]}, key=int)

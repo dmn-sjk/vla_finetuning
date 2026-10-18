@@ -23,8 +23,7 @@ def main():
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--card", type=Path, required=True)
     p.add_argument("--repo-id", required=True)
-    p.add_argument("--private", action="store_true",
-                   help="applies only when the repo is created")
+    p.add_argument("--private", action="store_true", help="applies only when the repo is created")
     p.add_argument("--dry-run", action="store_true", help="list what would upload, upload nothing")
     args = p.parse_args()
 

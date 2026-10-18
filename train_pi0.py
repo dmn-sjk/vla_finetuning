@@ -54,7 +54,9 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--val-episodes", type=int, default=40, help="held out by episode, not by frame")
     p.add_argument(
-        "--lora-target", choices=sorted(LORA_TARGETS), default="attention",
+        "--lora-target",
+        choices=sorted(LORA_TARGETS),
+        default="attention",
         help="which modules get adapters; see LORA_TARGETS",
     )
     p.add_argument("--lora-r", type=int, default=32)
@@ -70,11 +72,19 @@ def parse_args():
     p.add_argument("--resume", action="store_true", help="resume from out/last.pt if present")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--log-every", type=int, default=10)
-    p.add_argument("--warmup-steps", type=int, default=5,
-                   help="optimizer steps before throughput timing starts")
-    p.add_argument("--no-find-unused-parameters", dest="find_unused_parameters",
-                   action="store_false", default=True,
-                   help="disable find_unused_parameters; only safe with --lora-target default")
+    p.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=5,
+        help="optimizer steps before throughput timing starts",
+    )
+    p.add_argument(
+        "--no-find-unused-parameters",
+        dest="find_unused_parameters",
+        action="store_false",
+        default=True,
+        help="disable find_unused_parameters; only safe with --lora-target default",
+    )
     return p.parse_args()
 
 
@@ -107,8 +117,11 @@ def build_loaders(args, train_ds, val_ds):
         persistent_workers=args.num_workers > 0,
     )
     train_loader = DataLoader(
-        train_ds, sampler=train_sampler, shuffle=train_sampler is None,
-        drop_last=True, **common,
+        train_ds,
+        sampler=train_sampler,
+        shuffle=train_sampler is None,
+        drop_last=True,
+        **common,
     )
     val_loader = DataLoader(val_ds, sampler=val_sampler, shuffle=False, **common)
     return train_loader, val_loader, train_sampler
@@ -128,8 +141,16 @@ def _export_adapter(raw, dest: Path):
     os.replace(tmp, dest)
 
 
-def save_checkpoint(args, path: Path, policy, optimizer, epoch: int, global_step: int,
-                    best_val: float, is_best: bool):
+def save_checkpoint(
+    args,
+    path: Path,
+    policy,
+    optimizer,
+    epoch: int,
+    global_step: int,
+    best_val: float,
+    is_best: bool,
+):
     """Rank-0 only, atomic. `last.pt` resumes the run and `adapter/` is its export;
     `best.pt`/`adapter_best` hold the best val epoch.
     """
@@ -217,16 +238,19 @@ def main():
     train_loader, val_loader, train_sampler = build_loaders(args, train_ds, val_ds)
 
     policy = make_policy(cfg, ds_meta=meta)
-    policy = policy.wrap_with_peft(peft_cli_overrides={
-        "target_modules": LORA_TARGETS[args.lora_target],
-        "r": args.lora_r,
-        "lora_alpha": args.lora_alpha,
-        "lora_dropout": args.lora_dropout,
-    })
+    policy = policy.wrap_with_peft(
+        peft_cli_overrides={
+            "target_modules": LORA_TARGETS[args.lora_target],
+            "r": args.lora_r,
+            "lora_alpha": args.lora_alpha,
+            "lora_dropout": args.lora_dropout,
+        }
+    )
     policy.to(device)
 
     preprocessor, _ = make_pre_post_processors(
-        cfg, pretrained_path=args.policy,
+        cfg,
+        pretrained_path=args.policy,
         preprocessor_overrides={
             "device_processor": {"device": device.type},
             "normalizer_processor": {
@@ -257,15 +281,14 @@ def main():
     use_bf16 = args.bf16 and device.type == "cuda" and torch.cuda.is_bf16_supported()
     autocast_ctx = (
         (lambda: torch.autocast("cuda", dtype=torch.bfloat16))
-        if use_bf16 else contextlib.nullcontext
+        if use_bf16
+        else contextlib.nullcontext
     )
 
     start_epoch, global_step, best_val = 0, 0, float("inf")
     ckpt_path = args.out / "last.pt"
     if args.resume and ckpt_path.exists():
-        start_epoch, global_step, best_val = load_checkpoint(
-            ckpt_path, policy, optimizer, device
-        )
+        start_epoch, global_step, best_val = load_checkpoint(ckpt_path, policy, optimizer, device)
         D.print0(f"resumed from {ckpt_path} at epoch {start_epoch}, step {global_step}")
     D.barrier()
 
@@ -273,8 +296,8 @@ def main():
     D.print0(
         f"dataset={args.dataset} episodes: {n_train_eps} train / {n_val_eps} val\n"
         f"lora_target={args.lora_target} r={args.lora_r} alpha={args.lora_alpha}\n"
-        f"params: total={n_total/1e9:.2f}B trainable={n_trainable/1e6:.2f}M "
-        f"({100*n_trainable/n_total:.3f}%)\n"
+        f"params: total={n_total / 1e9:.2f}B trainable={n_trainable / 1e6:.2f}M "
+        f"({100 * n_trainable / n_total:.3f}%)\n"
         f"world_size={D.world_size()} per_device_bs={args.batch_size} "
         f"grad_accum={args.grad_accum} effective_batch={effective_batch} bf16={use_bf16}"
     )
@@ -282,11 +305,17 @@ def main():
     run = None
     if args.wandb and D.is_main_process():
         import wandb
+
         run = wandb.init(
-            project="vla-finetuning", dir=os.environ.get("WANDB_DIR"),
-            config={**vars(args), "world_size": D.world_size(),
-                    "effective_batch": effective_batch,
-                    "trainable_params": n_trainable, "total_params": n_total},
+            project="vla-finetuning",
+            dir=os.environ.get("WANDB_DIR"),
+            config={
+                **vars(args),
+                "world_size": D.world_size(),
+                "effective_batch": effective_batch,
+                "trainable_params": n_trainable,
+                "total_params": n_total,
+            },
         )
 
     policy.train()
@@ -336,8 +365,9 @@ def main():
                         f"epoch {epoch} step {global_step} loss {avg:.4f} peak_vram {vram:.1f}GiB"
                     )
                     if run is not None:
-                        run.log({"train/loss": avg, "epoch": epoch, "vram_gib": vram},
-                                step=global_step)
+                        run.log(
+                            {"train/loss": avg, "epoch": epoch, "vram_gib": vram}, step=global_step
+                        )
                     running, seen = 0.0, 0
 
                 if args.max_steps and global_step >= args.max_steps:
@@ -352,11 +382,13 @@ def main():
             f"{' (best)' if is_best else f' (best {best_val:.4f})'}"
         )
         if run is not None:
-            run.log({"val/loss": val_loss, "val/best_loss": best_val, "epoch": epoch},
-                    step=global_step)
+            run.log(
+                {"val/loss": val_loss, "val/best_loss": best_val, "epoch": epoch}, step=global_step
+            )
 
-        save_checkpoint(args, ckpt_path, policy, optimizer, epoch + 1, global_step,
-                        best_val, is_best)
+        save_checkpoint(
+            args, ckpt_path, policy, optimizer, epoch + 1, global_step, best_val, is_best
+        )
         D.barrier()
         if stop:
             D.print0(f"stopping at max_steps={args.max_steps}")
@@ -376,9 +408,7 @@ def main():
             f"elapsed_s={elapsed:.1f} peak_vram_gib={peak:.1f}"
         )
 
-    D.print0(
-        f"best val_loss {best_val:.4f}; best adapter: {args.out / 'adapter_best'}"
-    )
+    D.print0(f"best val_loss {best_val:.4f}; best adapter: {args.out / 'adapter_best'}")
     if run is not None:
         run.summary["val/best_loss"] = best_val
         run.finish()

@@ -179,15 +179,16 @@ def _assert_unnormalizes(postprocessor, stats_meta, cfg, args):
                 f"post-processor is not unnormalizing: unnormalize(0) returned {got.round(4)}. "
                 "The checkpoint appears to ship no action stats; drop --checkpoint-stats."
             )
-        print(f"unnormalize(0) = {got.round(4)} (checkpoint's own stats); "
-              f"{args.dataset} action mean = {mean[:dim].round(4)}")
+        print(
+            f"unnormalize(0) = {got.round(4)} (checkpoint's own stats); "
+            f"{args.dataset} action mean = {mean[:dim].round(4)}"
+        )
     elif not _np.allclose(got, mean[:dim], atol=1e-3):
         raise RuntimeError(
             "post-processor is not unnormalizing actions: unnormalize(0) returned "
             f"{got.round(4)}, expected the dataset action mean {mean[:dim].round(4)}. "
             "Rollouts would drive the robot with z-scores."
         )
-
 
 
 def make_env(bddl_file, resolution):
@@ -239,8 +240,18 @@ def verify_obs(args, device):
     print("\nPick the transform with the clearly lowest MSE on BOTH cameras.")
 
 
-def rollout_batch(policy, preprocessor, postprocessor, envs, instructions, max_steps, transform,
-                  device, autocast_ctx, cams):
+def rollout_batch(
+    policy,
+    preprocessor,
+    postprocessor,
+    envs,
+    instructions,
+    max_steps,
+    transform,
+    device,
+    autocast_ctx,
+    cams,
+):
     """Run one batch of episodes in lockstep. Returns per-episode (success, steps)."""
     n = len(envs)
     raws = []
@@ -257,9 +268,7 @@ def rollout_batch(policy, preprocessor, postprocessor, envs, instructions, max_s
     steps = [max_steps] * n
 
     for t in range(max_steps):
-        batch = {
-            key: torch.stack([to_chw01(transform(r[raw])) for r in raws]) for key, raw in cams
-        }
+        batch = {key: torch.stack([to_chw01(transform(r[raw])) for r in raws]) for key, raw in cams}
         batch["observation.state"] = torch.from_numpy(np.stack([build_state(r) for r in raws]))
         batch["task"] = list(instructions)
         with autocast_ctx():
@@ -282,26 +291,40 @@ def rollout_batch(policy, preprocessor, postprocessor, envs, instructions, max_s
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--adapter", type=Path, default=None,
-                   help="PEFT adapter dir; omit for a full checkpoint")
+    p.add_argument(
+        "--adapter", type=Path, default=None, help="PEFT adapter dir; omit for a full checkpoint"
+    )
     p.add_argument("--policy", default="lerobot/pi0", help="base weights or a full fine-tuned dir")
     p.add_argument("--suite", default="libero_spatial")
-    p.add_argument("--dataset", default="lerobot/libero_spatial_image",
-                   help="dataset supplying normalization stats (keep as the TRAINING set)")
+    p.add_argument(
+        "--dataset",
+        default="lerobot/libero_spatial_image",
+        help="dataset supplying normalization stats (keep as the TRAINING set)",
+    )
     p.add_argument("--episodes-per-task", type=int, default=50, help="LIBERO convention: 50")
     p.add_argument("--task-ids", type=int, nargs="*", default=None)
     p.add_argument("--envs-per-rank", type=int, default=8)
     p.add_argument("--resolution", type=int, default=256, help="must match the dataset (256)")
-    p.add_argument("--n-action-steps", type=int, default=5,
-                   help="steps executed per 50-step chunk; openpi replans every 5")
+    p.add_argument(
+        "--n-action-steps",
+        type=int,
+        default=5,
+        help="steps executed per 50-step chunk; openpi replans every 5",
+    )
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--image-transform", default="rot180", choices=list(IMAGE_TRANSFORMS))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-bf16", dest="bf16", action="store_false", default=True)
-    p.add_argument("--from-pretrained-config", action="store_true",
-                   help="inherit the checkpoint's config.json; for third-party checkpoints")
-    p.add_argument("--checkpoint-stats", action="store_true",
-                   help="use the checkpoint's own normalization stats; for third-party checkpoints")
+    p.add_argument(
+        "--from-pretrained-config",
+        action="store_true",
+        help="inherit the checkpoint's config.json; for third-party checkpoints",
+    )
+    p.add_argument(
+        "--checkpoint-stats",
+        action="store_true",
+        help="use the checkpoint's own normalization stats; for third-party checkpoints",
+    )
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--verify-obs", action="store_true")
     args = p.parse_args()
@@ -343,9 +366,12 @@ def main():
     jobs = [(tid, ep) for tid in task_ids for ep in range(args.episodes_per_task)]
     mine = jobs[R.rank :: R.world]
     if R.rank == 0:
-        print(f"{len(jobs)} episodes over {len(task_ids)} tasks, {R.world} rank(s), "
-              f"{args.envs_per_rank} env(s)/rank, n_action_steps={cfg.n_action_steps}, "
-              f"max_steps={max_steps}, transform={args.image_transform}", flush=True)
+        print(
+            f"{len(jobs)} episodes over {len(task_ids)} tasks, {R.world} rank(s), "
+            f"{args.envs_per_rank} env(s)/rank, n_action_steps={cfg.n_action_steps}, "
+            f"max_steps={max_steps}, transform={args.image_transform}",
+            flush=True,
+        )
 
     # group by task so envs are reused across trials
     by_task = defaultdict(list)
@@ -366,8 +392,15 @@ def main():
                 chunk = eps[i : i + len(pool)]
                 envs = [(pool[j], init_states[ep % len(init_states)]) for j, ep in enumerate(chunk)]
                 succ, steps = rollout_batch(
-                    policy, preprocessor, postprocessor, envs,
-                    [task.language] * len(chunk), max_steps, transform, device, autocast_ctx,
+                    policy,
+                    preprocessor,
+                    postprocessor,
+                    envs,
+                    [task.language] * len(chunk),
+                    max_steps,
+                    transform,
+                    device,
+                    autocast_ctx,
                     cams,
                 )
                 for ep, s, st in zip(chunk, succ, steps, strict=True):
@@ -375,8 +408,11 @@ def main():
                         {"task_id": tid, "episode": ep, "success": bool(s), "steps": int(st)}
                     )
                 nd = sum(r["success"] for r in results)
-                print(f"[rank {R.rank}] task {tid} {i + len(chunk)}/{len(eps)} "
-                      f"running {nd}/{len(results)}", flush=True)
+                print(
+                    f"[rank {R.rank}] task {tid} {i + len(chunk)}/{len(eps)} "
+                    f"running {nd}/{len(results)}",
+                    flush=True,
+                )
         finally:
             for e in pool:
                 e.close()
@@ -392,11 +428,15 @@ def main():
         print("\n=== per-task success ===")
         for tid in sorted(per_task):
             v = per_task[tid]
-            print(f"  task {tid}: {np.mean(v) * 100:5.1f}%  ({sum(v)}/{len(v)})  "
-                  f"{suite.get_task(tid).language[:52]!r}")
-        print(f"\nSUCCESS_RATE suite={args.suite} rate={overall * 100:.1f} "
-              f"se={se * 100:.1f} n={len(gathered)} "
-              f"n_action_steps={cfg.n_action_steps} checkpoint={args.adapter or args.policy}")
+            print(
+                f"  task {tid}: {np.mean(v) * 100:5.1f}%  ({sum(v)}/{len(v)})  "
+                f"{suite.get_task(tid).language[:52]!r}"
+            )
+        print(
+            f"\nSUCCESS_RATE suite={args.suite} rate={overall * 100:.1f} "
+            f"se={se * 100:.1f} n={len(gathered)} "
+            f"n_action_steps={cfg.n_action_steps} checkpoint={args.adapter or args.policy}"
+        )
         if args.out:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             json.dump(

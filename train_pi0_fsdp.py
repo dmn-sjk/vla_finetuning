@@ -36,14 +36,21 @@ def parse_args():
     p.add_argument("--policy", default="lerobot/pi0")
     p.add_argument("--finetune", choices=("full", "lora"), default="full")
     p.add_argument("--sharding", choices=SHARDING_CHOICES, default="full_shard")
-    p.add_argument("--cpu-offload", action="store_true",
-                   help="offload sharded params+grads to host RAM; last resort, very slow")
+    p.add_argument(
+        "--cpu-offload",
+        action="store_true",
+        help="offload sharded params+grads to host RAM; last resort, very slow",
+    )
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--max-steps", type=int, default=0, help="0 = no cap; for smoke tests")
     p.add_argument("--batch-size", type=int, default=8, help="per device")
     p.add_argument("--grad-accum", type=int, default=2)
-    p.add_argument("--lr", type=float, default=2.5e-5,
-                   help="pi0's own preset; a LoRA-sized LR destroys the pretraining")
+    p.add_argument(
+        "--lr",
+        type=float,
+        default=2.5e-5,
+        help="pi0's own preset; a LoRA-sized LR destroys the pretraining",
+    )
     p.add_argument("--lr-min", type=float, default=2.5e-6, help="cosine floor")
     p.add_argument("--lr-warmup-steps", type=int, default=200)
     p.add_argument("--lr-schedule", choices=("cosine", "constant"), default="cosine")
@@ -59,25 +66,47 @@ def parse_args():
     p.add_argument("--lora-dropout", type=float, default=0.05)
     p.add_argument("--grad-checkpointing", action="store_true")
     p.add_argument("--no-bf16", dest="bf16", action="store_false", default=True)
-    p.add_argument("--reduce-dtype", choices=("fp32", "bf16"), default="fp32",
-                   help="gradient reduce dtype; bf16 halves traffic but loses small updates")
     p.add_argument(
-        "--out", type=Path,
+        "--reduce-dtype",
+        choices=("fp32", "bf16"),
+        default="fp32",
+        help="gradient reduce dtype; bf16 halves traffic but loses small updates",
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
         default=run_dir("pi0_full"),
     )
     p.add_argument("--resume", action="store_true")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--log-every", type=int, default=10)
-    p.add_argument("--warmup-steps", type=int, default=5,
-                   help="optimizer steps to skip before the throughput timer starts")
-    p.add_argument("--export-dtype", choices=("bfloat16", "float32"), default="bfloat16",
-                   help="dtype of the exported full-FT checkpoint (16 GiB in fp32)")
-    p.add_argument("--no-export", action="store_true",
-                   help="skip full-model export; for benchmark runs, where it is dead I/O")
-    p.add_argument("--no-checkpoint", action="store_true",
-                   help="skip the 16 GiB resumable checkpoint; benchmark rows only")
-    p.add_argument("--oom-ok", action="store_true",
-                   help="report OOM as a result line and exit 0; world size 1 only")
+    p.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=5,
+        help="optimizer steps to skip before the throughput timer starts",
+    )
+    p.add_argument(
+        "--export-dtype",
+        choices=("bfloat16", "float32"),
+        default="bfloat16",
+        help="dtype of the exported full-FT checkpoint (16 GiB in fp32)",
+    )
+    p.add_argument(
+        "--no-export",
+        action="store_true",
+        help="skip full-model export; for benchmark runs, where it is dead I/O",
+    )
+    p.add_argument(
+        "--no-checkpoint",
+        action="store_true",
+        help="skip the 16 GiB resumable checkpoint; benchmark rows only",
+    )
+    p.add_argument(
+        "--oom-ok",
+        action="store_true",
+        help="report OOM as a result line and exit 0; world size 1 only",
+    )
     return p.parse_args()
 
 
@@ -175,16 +204,16 @@ def export_model(accelerator, args, policy, preprocessor, postprocessor, dest: P
     state = accelerator.get_state_dict(policy)
     if accelerator.is_main_process:
         if args.export_dtype == "bfloat16":
-            state = {k: v.to(torch.bfloat16) if v.is_floating_point() else v
-                     for k, v in state.items()}
+            state = {
+                k: v.to(torch.bfloat16) if v.is_floating_point() else v for k, v in state.items()
+            }
         tmp = dest.with_name(dest.name + ".tmp")
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
         unwrapped = accelerator.unwrap_model(policy)
         if args.finetune == "lora":
             # benchmark row only; train_pi0.py writes the real PEFT adapter
-            torch.save({k: v for k, v in state.items() if "lora" in k.lower()},
-                       tmp / "lora.pt")
+            torch.save({k: v for k, v in state.items() if "lora" in k.lower()}, tmp / "lora.pt")
         else:
             unwrapped.save_pretrained(tmp, state_dict=state)
             # processors carry the normalization stats
@@ -197,7 +226,7 @@ def export_model(accelerator, args, policy, preprocessor, postprocessor, dest: P
 
 def main():
     args = parse_args()
-    accelerator = build_accelerator(args)   # also initialises the process group
+    accelerator = build_accelerator(args)  # also initialises the process group
     device = accelerator.device
     torch.manual_seed(args.seed)
 
@@ -215,15 +244,18 @@ def main():
 
     policy = make_policy(cfg, ds_meta=meta)
     if args.finetune == "lora":
-        policy = policy.wrap_with_peft(peft_cli_overrides={
-            "target_modules": T.LORA_TARGETS[args.lora_target],
-            "r": args.lora_r,
-            "lora_alpha": args.lora_alpha,
-            "lora_dropout": args.lora_dropout,
-        })
+        policy = policy.wrap_with_peft(
+            peft_cli_overrides={
+                "target_modules": T.LORA_TARGETS[args.lora_target],
+                "r": args.lora_r,
+                "lora_alpha": args.lora_alpha,
+                "lora_dropout": args.lora_dropout,
+            }
+        )
 
     preprocessor, postprocessor = make_pre_post_processors(
-        cfg, pretrained_path=args.policy,
+        cfg,
+        pretrained_path=args.policy,
         preprocessor_overrides={
             "device_processor": {"device": device.type},
             "normalizer_processor": {
@@ -239,11 +271,12 @@ def main():
     # guard against class renames collapsing every param into the root unit
     n_wrapped = sum(
         sum(p.numel() for p in m.parameters())
-        for m in policy.modules() if type(m).__name__ in FSDP_WRAP_CLASSES
+        for m in policy.modules()
+        if type(m).__name__ in FSDP_WRAP_CLASSES
     )
     if args.sharding != "ddp" and n_wrapped < 0.5 * n_total:
         raise RuntimeError(
-            f"auto-wrap policy covers only {n_wrapped/1e9:.2f}B of {n_total/1e9:.2f}B "
+            f"auto-wrap policy covers only {n_wrapped / 1e9:.2f}B of {n_total / 1e9:.2f}B "
             f"parameters via {FSDP_WRAP_CLASSES}; the class names have probably moved"
         )
 
@@ -251,7 +284,9 @@ def main():
     # built after prepare() so the optimizer owns the sharded parameters
     optimizer = torch.optim.AdamW(
         [p for p in policy.parameters() if p.requires_grad],
-        lr=args.lr, betas=tuple(args.betas), weight_decay=args.weight_decay,
+        lr=args.lr,
+        betas=tuple(args.betas),
+        weight_decay=args.weight_decay,
     )
     optimizer = accelerator.prepare(optimizer)
 
@@ -280,9 +315,9 @@ def main():
         f"dataset={args.dataset} episodes: {n_train_eps} train / {n_val_eps} val\n"
         f"finetune={args.finetune} sharding={args.sharding} "
         f"cpu_offload={args.cpu_offload} grad_checkpointing={args.grad_checkpointing}\n"
-        f"params: total={n_total/1e9:.2f}B trainable={n_trainable/1e9:.3f}B "
-        f"({100*n_trainable/n_total:.2f}%) fsdp_wrapped={n_wrapped/1e9:.2f}B "
-        f"({100*n_wrapped/max(n_total,1):.0f}% of the model)\n"
+        f"params: total={n_total / 1e9:.2f}B trainable={n_trainable / 1e9:.3f}B "
+        f"({100 * n_trainable / n_total:.2f}%) fsdp_wrapped={n_wrapped / 1e9:.2f}B "
+        f"({100 * n_wrapped / max(n_total, 1):.0f}% of the model)\n"
         f"world_size={accelerator.num_processes} per_device_bs={args.batch_size} "
         f"grad_accum={args.grad_accum} effective_batch={effective_batch} "
         f"steps_per_epoch={steps_per_epoch} total_steps={total_steps} bf16={args.bf16}"
@@ -291,18 +326,38 @@ def main():
     run = None
     if args.wandb and accelerator.is_main_process:
         import wandb
+
         run = wandb.init(
-            project="vla-finetuning", dir=os.environ.get("WANDB_DIR"),
-            config={**{k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-                    "world_size": accelerator.num_processes,
-                    "effective_batch": effective_batch,
-                    "trainable_params": n_trainable, "total_params": n_total},
+            project="vla-finetuning",
+            dir=os.environ.get("WANDB_DIR"),
+            config={
+                **{k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+                "world_size": accelerator.num_processes,
+                "effective_batch": effective_batch,
+                "trainable_params": n_trainable,
+                "total_params": n_total,
+            },
         )
 
     try:
-        train(args, accelerator, policy, optimizer, scheduler, state, preprocessor,
-              postprocessor, train_loader, val_loader, train_sampler, effective_batch,
-              ckpt_dir, run, device, setup_peak)
+        train(
+            args,
+            accelerator,
+            policy,
+            optimizer,
+            scheduler,
+            state,
+            preprocessor,
+            postprocessor,
+            train_loader,
+            val_loader,
+            train_sampler,
+            effective_batch,
+            ckpt_dir,
+            run,
+            device,
+            setup_peak,
+        )
     except torch.OutOfMemoryError:
         if not args.oom_ok:
             raise
@@ -321,9 +376,24 @@ def main():
     accelerator.end_training()
 
 
-def train(args, accelerator, policy, optimizer, scheduler, state, preprocessor,
-          postprocessor, train_loader, val_loader, train_sampler, effective_batch,
-          ckpt_dir, run, device, setup_peak=0.0):
+def train(
+    args,
+    accelerator,
+    policy,
+    optimizer,
+    scheduler,
+    state,
+    preprocessor,
+    postprocessor,
+    train_loader,
+    val_loader,
+    train_sampler,
+    effective_batch,
+    ckpt_dir,
+    run,
+    device,
+    setup_peak=0.0,
+):
     policy.train()
     stop = False
     # time training segments only, excluding val and checkpoint writes
@@ -373,8 +443,15 @@ def train(args, accelerator, policy, optimizer, scheduler, state, preprocessor,
                         f"lr {scheduler.get_last_lr()[0]:.2e} peak_vram {vram:.1f}GiB"
                     )
                     if run is not None:
-                        run.log({"train/loss": avg, "epoch": epoch, "vram_gib": vram,
-                                 "lr": scheduler.get_last_lr()[0]}, step=state.global_step)
+                        run.log(
+                            {
+                                "train/loss": avg,
+                                "epoch": epoch,
+                                "vram_gib": vram,
+                                "lr": scheduler.get_last_lr()[0],
+                            },
+                            step=state.global_step,
+                        )
                     running, seen = 0.0, 0
 
                 if args.max_steps and state.global_step >= args.max_steps:
@@ -400,14 +477,17 @@ def train(args, accelerator, policy, optimizer, scheduler, state, preprocessor,
             f"{' (best)' if is_best else f' (best {state.best_val:.4f})'}"
         )
         if run is not None:
-            run.log({"val/loss": val_loss, "val/best_loss": state.best_val, "epoch": epoch},
-                    step=state.global_step)
+            run.log(
+                {"val/loss": val_loss, "val/best_loss": state.best_val, "epoch": epoch},
+                step=state.global_step,
+            )
 
         if not args.no_checkpoint:
             save_state(accelerator, args, ckpt_dir)
         if is_best:
-            export_model(accelerator, args, policy, preprocessor, postprocessor,
-                         args.out / "model_best")
+            export_model(
+                accelerator, args, policy, preprocessor, postprocessor, args.out / "model_best"
+            )
         if stop:
             D.print0(f"stopping at max_steps={args.max_steps}")
             break

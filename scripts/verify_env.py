@@ -50,6 +50,7 @@ def check(name: str):
     Deliberately does not stop at the first failure - knowing that three things
     are broken in one run beats discovering them one submission at a time.
     """
+
     def wrap(fn):
         print(f"\n=== {name}")
         try:
@@ -62,12 +63,14 @@ def check(name: str):
             print("    FAIL")
             traceback.print_exc(limit=3)
         return fn
+
     return wrap
 
 
 @check("torch + CUDA")
 def _torch():
     import torch
+
     print(f"    torch {torch.__version__}")
     assert "+cu" in torch.__version__, (
         f"CPU-only build: {torch.__version__}. Reinstall from the CUDA index."
@@ -84,6 +87,7 @@ def _tv():
     import torch
     import torchvision
     from torchvision.ops import nms
+
     print(f"    torchvision {torchvision.__version__}")
     boxes = torch.tensor([[0.0, 0.0, 1.0, 1.0], [0.1, 0.1, 1.0, 1.0]])
     # Touches the compiled extension; this is what fails when torchvision and
@@ -95,6 +99,7 @@ def _tv():
 def _tc():
     import torchcodec
     from torchcodec.decoders import VideoDecoder
+
     print(f"    torchcodec {torchcodec.__version__}")
 
     # Import alone is not proof: torchcodec probes several FFmpeg majors and only
@@ -110,9 +115,20 @@ def _tc():
     with tempfile.TemporaryDirectory() as td:
         clip = Path(td) / "clip.mp4"
         subprocess.run(
-            [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
-             "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=1",
-             "-pix_fmt", "yuv420p", str(clip)],
+            [
+                str(ffmpeg),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x64:rate=10:duration=1",
+                "-pix_fmt",
+                "yuv420p",
+                str(clip),
+            ],
             check=True,
         )
         frames = VideoDecoder(str(clip))[0:5]
@@ -144,6 +160,7 @@ def _peft():
     import importlib.metadata as md
 
     from peft import LoraConfig
+
     print(f"    peft {md.version('peft')}")
     LoraConfig(r=8, lora_alpha=16, target_modules=["q_proj"])
 
@@ -161,6 +178,7 @@ def _cv2():
     # headless's metadata in place -- ownership then reports a perfectly healthy cv2 that
     # cannot be imported. The sim install passes through exactly that state.
     import cv2
+
     owners = md.packages_distributions().get("cv2") or []
     print(f"    cv2 {cv2.__version__} provided by: {', '.join(sorted(owners)) or '(unknown)'}")
 
@@ -170,7 +188,7 @@ def _cv2():
     # `libGL.so.1: cannot open shared object file`. Ownership is the test, not presence.
     assert "opencv-python" not in owners, (
         "opencv-python (GUI) owns cv2 and has clobbered the headless build; uninstall it "
-        "and reinstall opencv-python-headless (see README, \"Simulator\")"
+        'and reinstall opencv-python-headless (see README, "Simulator")'
     )
 
 
@@ -185,7 +203,7 @@ def _libero():
     if importlib.util.find_spec("libero") is None:
         raise Absent(
             "not installed - training does not need it. Closed-loop rollouts do; "
-            "see README, \"Simulator, for evaluation only\"."
+            'see README, "Simulator, for evaluation only".'
         )
 
     # libero/libero/__init__.py prompts via input() at import time whenever its config.yaml
@@ -197,7 +215,7 @@ def _libero():
     assert cfg_dir, "LIBERO_CONFIG_PATH is unset - source slurm/common.sh first"
     assert Path(cfg_dir, "config.yaml").is_file(), (
         f"{cfg_dir}/config.yaml does not exist - importing libero would prompt via input() "
-        "and hang this job. Create it first; see README, \"Simulator\"."
+        'and hang this job. Create it first; see README, "Simulator".'
     )
 
     # robosuite's version comes from metadata rather than `import robosuite`: importing it
@@ -228,18 +246,26 @@ def _libero():
     assert assets is not None, (
         "no asset tree found: neither the package `assets/` path nor ~/.cache/libero/assets "
         "exists, so the first rollout would download 409 MB into $HOME. Redirect the cache "
-        "to scratch first; see README, \"Simulator\"."
+        'to scratch first; see README, "Simulator".'
     )
     assert assets.is_dir(), f"{assets} is a dangling symlink -> {os.readlink(assets)}"
 
     # Upstream's own freshness check (download_utils.py) looks at the first four of these;
     # `scenes` is in the published tree and just as load-bearing, so check all five.
-    missing = [d for d in ("articulated_objects", "stable_scanned_objects",
-                           "turbosquid_objects", "stable_hope_objects", "scenes")
-               if not (assets / d).is_dir()]
+    missing = [
+        d
+        for d in (
+            "articulated_objects",
+            "stable_scanned_objects",
+            "turbosquid_objects",
+            "stable_hope_objects",
+            "scenes",
+        )
+        if not (assets / d).is_dir()
+    ]
     assert not missing, (
         f"assets at {assets} are incomplete (missing {', '.join(missing)}); rollouts will "
-        "fail at the first object lookup. See README, \"Simulator\"."
+        'fail at the first object lookup. See README, "Simulator".'
     )
     target = Path(os.readlink(assets)) if assets.is_symlink() else assets
     print(f"    assets: {assets}" + (f" -> {target}" if assets.is_symlink() else ""))
