@@ -69,7 +69,7 @@ echo
 
 for t in "${TARGETS[@]}"; do
   echo "======== $t ========"
-  cmd=(python scripts/publish_to_hub.py
+  cmd=(python -m scripts.publish_to_hub
        --checkpoint "${CKPT[$t]}"
        --card       "${CARD[$t]}"
        --repo-id    "$HF_USER/${NAME[$t]}")

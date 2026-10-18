@@ -2,7 +2,7 @@
 
 `--check` re-derives every rate from the per-episode records and fails on a mismatch.
 
-    python scripts/render_results.py results/libero_spatial_*.json
+    python -m scripts.render_results results/libero_spatial_*.json
 """
 
 import argparse

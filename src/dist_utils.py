@@ -28,7 +28,7 @@ def is_main_process() -> bool:
     return rank() == 0
 
 
-def setup() -> torch.device:
+def setup(timeout: timedelta = timedelta(minutes=30)) -> torch.device:
     """Bind this process to its GPU and join the process group."""
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank())
@@ -40,7 +40,7 @@ def setup() -> torch.device:
         # device_id pins collectives to this GPU
         dist.init_process_group(
             backend="nccl" if torch.cuda.is_available() else "gloo",
-            timeout=timedelta(minutes=30),
+            timeout=timeout,
             device_id=device if device.type == "cuda" else None,
         )
     return device
@@ -65,6 +65,19 @@ def all_reduce_sum(value: float, device: torch.device) -> float:
     t = torch.tensor([value], dtype=torch.float64, device=device)
     dist.all_reduce(t, op=dist.ReduceOp.SUM)
     return t.item()
+
+
+def gather_object(obj) -> list:
+    """Every rank's `obj`, in rank order."""
+    if not is_distributed():
+        return [obj]
+    out = [None] * world_size()
+    dist.all_gather_object(out, obj)
+    return out
+
+
+def peak_vram_gib(device: torch.device) -> float:
+    return torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0
 
 
 def print0(*args, **kwargs) -> None:

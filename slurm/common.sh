@@ -3,7 +3,7 @@
 # Each variable below is only defaulted, so an exported value wins:
 #   VLA_ROOT (./work), VLA_RUNS ($VLA_ROOT/runs), VLA_FFMPEG_PREFIX ($VLA_ROOT/ffmpeg),
 #   VLA_VENV (first of $UV_PROJECT_ENVIRONMENT, $VIRTUAL_ENV, $VLA_ROOT/venvs/vla, ./.venv),
-#   NCCL_SOCKET_IFNAME (ib0), HF_HOME, TRITON_CACHE_DIR, WANDB_DIR, LIBERO_CONFIG_PATH, MUJOCO_GL.
+#   NCCL_SOCKET_IFNAME (ib0), HF_HOME, TRITON_CACHE_DIR, WANDB_DIR, LIBERO_CONFIG_PATH.
 # Set the SLURM account and partition with SBATCH_ACCOUNT / SBATCH_PARTITION.
 
 VLA_REPO="${SLURM_SUBMIT_DIR:-$PWD}"
@@ -23,7 +23,6 @@ export HF_HOME="${HF_HOME:-$VLA_ROOT/hf}"
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$VLA_ROOT/.triton}"
 export WANDB_DIR="${WANDB_DIR:-$VLA_ROOT/wandb}"
 export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_PATH:-$VLA_ROOT/libero_config}"
-export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTHONUNBUFFERED=1
 
 # NCCL can bootstrap over a down interface and hang; pin it. Tensor traffic still uses IB,

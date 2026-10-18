@@ -23,15 +23,15 @@ RESULTS=$(mktemp)
 trap 'rm -f "$RESULTS"' EXIT
 
 echo "=================== 1/3: LoRA adapter_best ==================="
-python scripts/eval_adapter.py \
+python -m scripts.eval_adapter \
   --adapter "$CKPT_ROOT/pi0_libero/adapter_best" $COMMON | tee -a "$RESULTS"
 
 echo "=================== 2/3: full FT model_best ==================="
-python scripts/eval_adapter.py \
+python -m scripts.eval_adapter \
   --policy "$CKPT_ROOT/pi0_full/model_best" $COMMON | tee -a "$RESULTS"
 
 echo "=================== 3/3: base lerobot/pi0 ==================="
-python scripts/eval_adapter.py --policy lerobot/pi0 $COMMON | tee -a "$RESULTS"
+python -m scripts.eval_adapter --policy lerobot/pi0 $COMMON | tee -a "$RESULTS"
 
 echo "=================== comparison ==================="
 grep -E "^VAL_LOSS" "$RESULTS" || true

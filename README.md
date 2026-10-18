@@ -17,6 +17,10 @@ This is a code that was used to finetune the two $\pi_{0}$ weight checkpoints on
 ```
 train_pi0.py                         # Phase 2 entrypoint: pi0 + LoRA on LIBERO, native DDP
 train_pi0_fsdp.py                    # Phase 2B entrypoint: pi0 full FT under FSDP, via accelerate
+src/pi0.py                           # LoRA presets, processors, autocast, the val-loss evaluation
+src/data.py                          # episode-level train/val split and loaders
+src/cli.py                           # flags shared by both training entrypoints
+src/timing.py                        # cross-rank throughput timer
 src/dist_utils.py                    # process group setup, rank gating, cross-rank reductions
 src/paths.py                         # $VLA_ROOT / $VLA_RUNS resolution, shared with the shell
 scripts/verify_env.py                # checks the pieces that have historically broken here
@@ -44,9 +48,10 @@ constraints.txt                      # pins for installing the LIBERO simulator 
 ```
 
 The Phase 2 and Phase 2B entrypoints sit side by side: `train_pi0.py` stays the verified
-production recipe, and `train_pi0_fsdp.py` builds beside it and imports its dataset split,
-loaders and evaluation function, so a full-FT number and a LoRA number are measured on exactly
-the same held-out episodes.
+production recipe, and `train_pi0_fsdp.py` builds beside it. Both take the dataset split,
+loaders and evaluation function from `src/`, so a full-FT number and a LoRA number are
+measured on exactly the same held-out episodes. Run the `scripts/` entrypoints as modules
+from the repo root (`python -m scripts.eval_adapter ...`).
 
 ## Setup
 Requires [uv](https://docs.astral.sh/uv/). Dependencies are pinned in `uv.lock`.
@@ -97,7 +102,7 @@ After setup, verify if the pieces actually work here:
 
 ```bash
 source slurm/common.sh        # venv + caches + .env; no manual activation needed
-python scripts/verify_env.py
+python -m scripts.verify_env
 ```
 
 ### SLURM setup
@@ -207,7 +212,7 @@ Evaluate a saved adapter. **Always pass `--repeats`**: π0 is a flow-matching mo
 validation loss is a stochastic estimate and a single number is misleading.
 
 ```bash
-python scripts/eval_adapter.py --adapter $VLA_RUNS/pi0_libero/adapter_best \
+python -m scripts.eval_adapter --adapter $VLA_RUNS/pi0_libero/adapter_best \
   --repeats 5
 ```
 
@@ -222,7 +227,7 @@ The exported checkpoint
 is a complete π0 policy directory, so it evaluates through the same script as the adapter:
 
 ```bash
-python scripts/eval_adapter.py --policy $VLA_RUNS/pi0_full/model_best \
+python -m scripts.eval_adapter --policy $VLA_RUNS/pi0_full/model_best \
   --repeats 5
 ```
 

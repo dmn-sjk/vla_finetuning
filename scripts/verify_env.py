@@ -18,7 +18,7 @@ rather than failing when it is simply not installed.
 Run on a compute node - the GPU checks need a real device:
 
     srun -p plgrid-now -A <account> --gres=gpu:1 -t 00:10:00 \
-        python scripts/verify_env.py
+        python -m scripts.verify_env
 """
 
 import shutil
@@ -28,8 +28,7 @@ import tempfile
 import traceback
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.paths import ffmpeg_prefix  # noqa: E402
+from src.paths import ffmpeg_prefix
 
 FAILURES: list[str] = []
 
@@ -221,6 +220,8 @@ def _libero():
     # robosuite's version comes from metadata rather than `import robosuite`: importing it
     # pulls mujoco's EGL bindings, which die with an opaque OpenGL NoneType error on any
     # host with no libEGL on the library path. Nothing here needs the module itself.
+    # libero's own imports may still load robosuite; pick the renderer first, as eval_libero.py does
+    os.environ.setdefault("MUJOCO_GL", "egl")
     import libero.libero
     from libero.libero import benchmark, get_libero_path
 

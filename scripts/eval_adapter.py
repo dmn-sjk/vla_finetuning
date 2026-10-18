@@ -3,25 +3,22 @@
 Loads the base weights fresh, applies the checkpoint, and evaluates on the training split's
 held-out episodes, so the result is comparable to the training log.
 
-    python scripts/eval_adapter.py --adapter <run>/adapter_best --repeats 5
-    python scripts/eval_adapter.py --policy <run>/model_best --repeats 5
+    python -m scripts.eval_adapter --adapter <run>/adapter_best --repeats 5
+    python -m scripts.eval_adapter --policy <run>/model_best --repeats 5
 """
 
 import argparse
-import contextlib
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import torch
+from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+from lerobot.policies.factory import make_policy
+from lerobot.policies.pi0.configuration_pi0 import PI0Config
+from torch.utils.data import DataLoader
 
-import torch  # noqa: E402
-from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # noqa: E402
-from lerobot.policies.factory import make_policy, make_pre_post_processors  # noqa: E402
-from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
-from torch.utils.data import DataLoader  # noqa: E402
-
-import train_pi0 as T  # noqa: E402
+from src.data import build_datasets
+from src.pi0 import autocast_ctx, evaluate, make_processors
 
 
 def main():
@@ -60,7 +57,7 @@ def main():
     )
 
     ds_args = SimpleNamespace(dataset=args.dataset, val_episodes=args.val_episodes)
-    _, val_ds, n_train_eps, n_val_eps = T.build_datasets(ds_args, meta, cfg)
+    _, val_ds, n_train_eps, n_val_eps = build_datasets(ds_args, meta, cfg)
     print(
         f"{args.dataset}: {n_train_eps} train / {n_val_eps} val episodes ({len(val_ds)} val frames)"
     )
@@ -79,24 +76,9 @@ def main():
         )
 
     policy.to(device).eval()
-    preprocessor, _ = make_pre_post_processors(
-        cfg,
-        pretrained_path=args.policy,
-        preprocessor_overrides={
-            "device_processor": {"device": device.type},
-            "normalizer_processor": {
-                "stats": meta.stats,
-                "features": {**cfg.input_features, **cfg.output_features},
-                "norm_map": cfg.normalization_mapping,
-            },
-        },
-    )
+    preprocessor, _ = make_processors(cfg, meta, device, args.policy)
 
-    autocast_ctx = (
-        (lambda: torch.autocast("cuda", dtype=torch.bfloat16))
-        if args.bf16 and device.type == "cuda"
-        else contextlib.nullcontext
-    )
+    autocast = autocast_ctx(args.bf16 and device.type == "cuda")
     loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
@@ -107,9 +89,7 @@ def main():
 
     losses = []
     for i in range(args.repeats):
-        losses.append(
-            T.evaluate(policy, loader, preprocessor, autocast_ctx, device, seed=args.seed + i)
-        )
+        losses.append(evaluate(policy, loader, preprocessor, autocast, device, seed=args.seed + i))
         print(f"  repeat {i} (seed {args.seed + i}): {losses[-1]:.4f}")
 
     mean = sum(losses) / len(losses)

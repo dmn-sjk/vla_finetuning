@@ -21,7 +21,7 @@ COMMON="--suite libero_spatial --dataset HuggingFaceVLA/libero --policy $REF \
         --from-pretrained-config --checkpoint-stats --envs-per-rank 8"
 
 launch () { srun torchrun --nnodes=1 --nproc_per_node=4 \
-  --rdzv_backend=c10d --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" scripts/eval_libero.py "$@"; }
+  --rdzv_backend=c10d --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" -m scripts.eval_libero "$@"; }
 
 echo "================ sanity: 3 tasks x 5 trials ================"
 # shellcheck disable=SC2086

@@ -5,23 +5,27 @@ SiglipEncoderLayer instead of GemmaDecoderLayer. See docs/notes.md.
 """
 
 import argparse
-import contextlib
 import math
 import os
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedType, FullyShardedDataParallelPlugin
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
-from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.policies.factory import make_policy
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
 
-import train_pi0 as T
 from src import dist_utils as D
+from src.cli import add_common_args
+from src.data import build_datasets, build_loaders
 from src.paths import run_dir
+from src.pi0 import autocast_ctx, evaluate, make_processors, wrap_lora
+from src.timing import ThroughputTimer
 
 # matched by class name to avoid importing transformers internals
 FSDP_WRAP_CLASSES = ("GemmaMLP", "SiglipEncoderLayer")
@@ -32,8 +36,7 @@ SHARDING_CHOICES = ("ddp", "no_shard", "shard_grad_op", "full_shard")
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", default="lerobot/libero_spatial_image")
-    p.add_argument("--policy", default="lerobot/pi0")
+    add_common_args(p)
     p.add_argument("--finetune", choices=("full", "lora"), default="full")
     p.add_argument("--sharding", choices=SHARDING_CHOICES, default="full_shard")
     p.add_argument(
@@ -41,10 +44,6 @@ def parse_args():
         action="store_true",
         help="offload sharded params+grads to host RAM; last resort, very slow",
     )
-    p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--max-steps", type=int, default=0, help="0 = no cap; for smoke tests")
-    p.add_argument("--batch-size", type=int, default=8, help="per device")
-    p.add_argument("--grad-accum", type=int, default=2)
     p.add_argument(
         "--lr",
         type=float,
@@ -57,35 +56,13 @@ def parse_args():
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--betas", type=float, nargs=2, default=(0.9, 0.95))
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--num-workers", type=int, default=8)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--val-episodes", type=int, default=40)
-    p.add_argument("--lora-target", choices=sorted(T.LORA_TARGETS), default="attention")
-    p.add_argument("--lora-r", type=int, default=32)
-    p.add_argument("--lora-alpha", type=int, default=64)
-    p.add_argument("--lora-dropout", type=float, default=0.05)
-    p.add_argument("--grad-checkpointing", action="store_true")
-    p.add_argument("--no-bf16", dest="bf16", action="store_false", default=True)
     p.add_argument(
         "--reduce-dtype",
         choices=("fp32", "bf16"),
         default="fp32",
         help="gradient reduce dtype; bf16 halves traffic but loses small updates",
     )
-    p.add_argument(
-        "--out",
-        type=Path,
-        default=run_dir("pi0_full"),
-    )
-    p.add_argument("--resume", action="store_true")
-    p.add_argument("--wandb", action="store_true")
-    p.add_argument("--log-every", type=int, default=10)
-    p.add_argument(
-        "--warmup-steps",
-        type=int,
-        default=5,
-        help="optimizer steps to skip before the throughput timer starts",
-    )
+    p.add_argument("--out", type=Path, default=run_dir("pi0_full"))
     p.add_argument(
         "--export-dtype",
         choices=("bfloat16", "float32"),
@@ -182,6 +159,28 @@ class TrainState:
         self.best_val = sd["best_val"]
 
 
+@dataclass
+class TrainContext:
+    """Everything the training loop needs, built by main()."""
+
+    args: argparse.Namespace
+    accelerator: Accelerator
+    policy: Any
+    optimizer: Any
+    scheduler: Any
+    state: TrainState
+    preprocessor: Any
+    postprocessor: Any
+    train_loader: Any
+    val_loader: Any
+    train_sampler: Any
+    effective_batch: int
+    ckpt_dir: Path
+    run: Any
+    device: torch.device
+    setup_peak: float
+
+
 def save_state(accelerator, args, path: Path):
     """Sharded checkpoint written beside the target, then swapped in by rank 0."""
     tmp = path.with_name(path.name + ".tmp")
@@ -239,32 +238,16 @@ def main():
         gradient_checkpointing=args.grad_checkpointing,
     )
 
-    train_ds, val_ds, n_train_eps, n_val_eps = T.build_datasets(args, meta, cfg)
-    train_loader, val_loader, train_sampler = T.build_loaders(args, train_ds, val_ds)
+    train_ds, val_ds, n_train_eps, n_val_eps = build_datasets(args, meta, cfg)
+    train_loader, val_loader, train_sampler = build_loaders(args, train_ds, val_ds)
 
     policy = make_policy(cfg, ds_meta=meta)
     if args.finetune == "lora":
-        policy = policy.wrap_with_peft(
-            peft_cli_overrides={
-                "target_modules": T.LORA_TARGETS[args.lora_target],
-                "r": args.lora_r,
-                "lora_alpha": args.lora_alpha,
-                "lora_dropout": args.lora_dropout,
-            }
+        policy = wrap_lora(
+            policy, args.lora_target, args.lora_r, args.lora_alpha, args.lora_dropout
         )
 
-    preprocessor, postprocessor = make_pre_post_processors(
-        cfg,
-        pretrained_path=args.policy,
-        preprocessor_overrides={
-            "device_processor": {"device": device.type},
-            "normalizer_processor": {
-                "stats": meta.stats,
-                "features": {**cfg.input_features, **cfg.output_features},
-                "norm_map": cfg.normalization_mapping,
-            },
-        },
-    )
+    preprocessor, postprocessor = make_processors(cfg, meta, device, args.policy)
 
     n_total = sum(p.numel() for p in policy.parameters())
     n_trainable = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -291,7 +274,7 @@ def main():
     optimizer = accelerator.prepare(optimizer)
 
     # exclude the fp32 construction transient from the training peak
-    setup_peak = torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0
+    setup_peak = D.peak_vram_gib(device)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
@@ -341,27 +324,29 @@ def main():
 
     try:
         train(
-            args,
-            accelerator,
-            policy,
-            optimizer,
-            scheduler,
-            state,
-            preprocessor,
-            postprocessor,
-            train_loader,
-            val_loader,
-            train_sampler,
-            effective_batch,
-            ckpt_dir,
-            run,
-            device,
-            setup_peak,
+            TrainContext(
+                args=args,
+                accelerator=accelerator,
+                policy=policy,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                state=state,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                train_sampler=train_sampler,
+                effective_batch=effective_batch,
+                ckpt_dir=ckpt_dir,
+                run=run,
+                device=device,
+                setup_peak=setup_peak,
+            )
         )
     except torch.OutOfMemoryError:
         if not args.oom_ok:
             raise
-        peak = torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0
+        peak = D.peak_vram_gib(device)
         D.print0(
             f"OOM_EXPECTED finetune={args.finetune} sharding={args.sharding} "
             f"world_size={accelerator.num_processes} per_device_bs={args.batch_size} "
@@ -376,38 +361,23 @@ def main():
     accelerator.end_training()
 
 
-def train(
-    args,
-    accelerator,
-    policy,
-    optimizer,
-    scheduler,
-    state,
-    preprocessor,
-    postprocessor,
-    train_loader,
-    val_loader,
-    train_sampler,
-    effective_batch,
-    ckpt_dir,
-    run,
-    device,
-    setup_peak=0.0,
-):
+def train(ctx: TrainContext):
+    args, accelerator, policy, device = ctx.args, ctx.accelerator, ctx.policy, ctx.device
+    state, optimizer, scheduler, run = ctx.state, ctx.optimizer, ctx.scheduler, ctx.run
+    preprocessor = ctx.preprocessor
     policy.train()
     stop = False
     # time training segments only, excluding val and checkpoint writes
-    timed_started, seg_start, timed_elapsed, timed_samples, timed_peak = False, None, 0.0, 0, 0.0
+    timer, timed_peak = ThroughputTimer(device, accelerator.wait_for_everyone), 0.0
     trainable = [p for p in policy.parameters() if p.requires_grad]
 
     for epoch in range(state.epoch, args.epochs):
-        if train_sampler is not None:
-            train_sampler.set_epoch(epoch)
-        if timed_started and seg_start is None:
-            seg_start = time.time()
+        if ctx.train_sampler is not None:
+            ctx.train_sampler.set_epoch(epoch)
+        timer.resume()
 
         t0, running, seen = time.time(), 0.0, 0
-        for i, raw in enumerate(train_loader):
+        for i, raw in enumerate(ctx.train_loader):
             batch = preprocessor(raw)
             with accelerator.autocast():
                 loss, _ = policy(batch)
@@ -416,8 +386,7 @@ def train(
 
             running += loss.item()
             seen += 1
-            if timed_started:
-                timed_samples += args.batch_size * accelerator.num_processes
+            timer.add(args.batch_size * accelerator.num_processes)
 
             if (i + 1) % args.grad_accum == 0:
                 if args.grad_clip > 0:
@@ -428,16 +397,12 @@ def train(
                 optimizer.zero_grad(set_to_none=True)
                 state.global_step += 1
 
-                if state.global_step == args.warmup_steps and not timed_started:
-                    if device.type == "cuda":
-                        torch.cuda.synchronize()
-                    accelerator.wait_for_everyone()
-                    timed_started, seg_start, timed_samples = True, time.time(), 0
+                if state.global_step == args.warmup_steps and not timer.started:
+                    timer.start()
 
                 if state.global_step % args.log_every == 0:
                     avg = running / max(seen, 1)
-                    cuda = device.type == "cuda"
-                    vram = torch.cuda.max_memory_allocated() / 2**30 if cuda else 0.0
+                    vram = D.peak_vram_gib(device)
                     D.print0(
                         f"epoch {epoch} step {state.global_step} loss {avg:.4f} "
                         f"lr {scheduler.get_last_lr()[0]:.2e} peak_vram {vram:.1f}GiB"
@@ -458,17 +423,13 @@ def train(
                     stop = True
                     break
 
-        if seg_start is not None:
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            accelerator.wait_for_everyone()
-            timed_elapsed += time.time() - seg_start
-            seg_start = None
+        if timer.running:
+            timer.pause()
             # read before export, which gathers full parameters on the GPU
-            timed_peak = torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0
+            timed_peak = D.peak_vram_gib(device)
 
         # accelerate already wraps the forward in autocast
-        val_loss = T.evaluate(policy, val_loader, preprocessor, contextlib.nullcontext, device)
+        val_loss = evaluate(policy, ctx.val_loader, preprocessor, autocast_ctx(False), device)
         is_best = val_loss < state.best_val
         state.best_val = min(state.best_val, val_loss)
         state.epoch = epoch + 1
@@ -483,28 +444,27 @@ def train(
             )
 
         if not args.no_checkpoint:
-            save_state(accelerator, args, ckpt_dir)
+            save_state(accelerator, args, ctx.ckpt_dir)
         if is_best:
             export_model(
-                accelerator, args, policy, preprocessor, postprocessor, args.out / "model_best"
+                accelerator, args, policy, preprocessor, ctx.postprocessor, args.out / "model_best"
             )
         if stop:
             D.print0(f"stopping at max_steps={args.max_steps}")
             break
 
-    if timed_started and timed_elapsed > 0:
-        elapsed, peak = timed_elapsed, timed_peak
+    if timer.started and timer.elapsed > 0:
         D.print0(
             f"THROUGHPUT finetune={args.finetune} sharding={args.sharding} "
             f"world_size={accelerator.num_processes} per_device_bs={args.batch_size} "
-            f"grad_accum={args.grad_accum} effective_batch={effective_batch} "
+            f"grad_accum={args.grad_accum} effective_batch={ctx.effective_batch} "
             f"grad_checkpointing={args.grad_checkpointing} "
-            f"samples_per_s={timed_samples / max(elapsed, 1e-9):.1f} "
-            f"elapsed_s={elapsed:.1f} peak_vram_gib={peak:.1f} "
-            f"setup_peak_gib={setup_peak:.1f}"
+            f"samples_per_s={timer.samples_per_s:.1f} "
+            f"elapsed_s={timer.elapsed:.1f} peak_vram_gib={timed_peak:.1f} "
+            f"setup_peak_gib={ctx.setup_peak:.1f}"
         )
 
-    export_model(accelerator, args, policy, preprocessor, postprocessor, args.out / "model")
+    export_model(accelerator, args, policy, preprocessor, ctx.postprocessor, args.out / "model")
     D.print0(
         f"best val_loss {state.best_val:.4f}; "
         f"{args.out / 'model_best'} is the checkpoint to publish"

@@ -47,7 +47,7 @@ in the README; this file only explains why.
   video). Dataloading is CPU-bound PNG decode on Lustre; give it workers.
 - Split validation by episode, not frame: adjacent frames are near-duplicates.
 - Val loss is stochastic (flow matching samples a timestep and noise per forward). Use
-  `scripts/eval_adapter.py --repeats N` and report mean +- std. Differences below ~0.005 are
+  `python -m scripts.eval_adapter --repeats N` and report mean +- std. Differences below ~0.005 are
   noise. `evaluate()` offsets the seed per rank, otherwise ranks draw identical noise.
 - Val loss only exercises `policy.forward()`. It says nothing about the inference path
   (unnormalization, KV-cache prefill, Euler sampling in `sample_actions`).

@@ -2,35 +2,32 @@
 
 Protocol: 10 tasks x 50 trials from the suite's saved initial states, suite step cap.
 
-    python scripts/eval_libero.py --verify-obs
-    torchrun --nproc_per_node=8 scripts/eval_libero.py \
+    python -m scripts.eval_libero --verify-obs
+    torchrun --nproc_per_node=8 -m scripts.eval_libero \
         --adapter <run>/adapter_best --out results/lora.json
 """
 
 import argparse
-import contextlib
 import json
 import os
-import sys
 from collections import defaultdict
 from datetime import timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-# renderer must be chosen before robosuite is imported; one GPU per rank
+# renderer must be chosen before anything can import robosuite; one GPU per rank
 os.environ.setdefault("MUJOCO_GL", "egl")
-_LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
-os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", str(_LOCAL_RANK))
-os.environ.setdefault("EGL_DEVICE_ID", str(_LOCAL_RANK))
+os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", os.environ.get("LOCAL_RANK", "0"))
+os.environ.setdefault("EGL_DEVICE_ID", os.environ.get("LOCAL_RANK", "0"))
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
-import torch.distributed as dist  # noqa: E402
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # noqa: E402
 from lerobot.policies.factory import make_policy, make_pre_post_processors  # noqa: E402
 from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
 from lerobot.utils.constants import ACTION  # noqa: E402
+
+from src import dist_utils as D  # noqa: E402
+from src.pi0 import autocast_ctx, make_processors  # noqa: E402
 
 # LIBERO's own per-suite step budgets
 SUITE_MAX_STEPS = {
@@ -78,31 +75,6 @@ def to_chw01(img_hwc_uint8):
     return torch.from_numpy(a).permute(2, 0, 1).float().div_(255.0)
 
 
-class Rank:
-    """Minimal distributed helper: this script only ever needs rank/world and one gather."""
-
-    def __init__(self):
-        self.world = int(os.environ.get("WORLD_SIZE", "1"))
-        self.rank = int(os.environ.get("RANK", "0"))
-        self.local = _LOCAL_RANK
-        self.dist = self.world > 1
-        if self.dist:
-            # long timeout: ranks finish at very different times
-            dist.init_process_group(backend="nccl", timeout=timedelta(hours=2))
-
-    def gather(self, obj):
-        if not self.dist:
-            return [obj]
-        out = [None] * self.world
-        dist.all_gather_object(out, obj)
-        return out
-
-    def close(self):
-        if self.dist:
-            dist.barrier()
-            dist.destroy_process_group()
-
-
 def load_policy(args, device, stats_meta):
     if args.from_pretrained_config:
         # inherit the checkpoint's structure (cameras, empty_cameras) from its config.json
@@ -127,25 +99,19 @@ def load_policy(args, device, stats_meta):
         policy = PeftModel.from_pretrained(policy, str(args.adapter))
     policy.to(device).eval()
 
-    norm = {
-        "stats": stats_meta.stats,
-        "features": {**cfg.input_features, **cfg.output_features},
-        "norm_map": cfg.normalization_mapping,
-    }
     if args.checkpoint_stats:
         # third-party checkpoints ship the stats they were trained with
-        pre_over = {"device_processor": {"device": device.type}}
-        post_over = {}
+        preprocessor, postprocessor = make_pre_post_processors(
+            cfg,
+            pretrained_path=args.policy,
+            preprocessor_overrides={"device_processor": {"device": device.type}},
+            postprocessor_overrides={},
+        )
     else:
-        pre_over = {"device_processor": {"device": device.type}, "normalizer_processor": norm}
-        post_over = {"unnormalizer_processor": norm}
-    preprocessor, postprocessor = make_pre_post_processors(
-        cfg,
-        pretrained_path=args.policy,
-        preprocessor_overrides=pre_over,
         # the unnormalizer needs the training stats too
-        postprocessor_overrides=post_over,
-    )
+        preprocessor, postprocessor = make_processors(
+            cfg, stats_meta, device, args.policy, unnormalize=True
+        )
     _assert_unnormalizes(postprocessor, stats_meta, cfg, args)
 
     # skip empty_camera_* padding slots: pi0 fills them itself
@@ -249,7 +215,7 @@ def rollout_batch(
     max_steps,
     transform,
     device,
-    autocast_ctx,
+    autocast,
     cams,
 ):
     """Run one batch of episodes in lockstep. Returns per-episode (success, steps)."""
@@ -271,7 +237,7 @@ def rollout_batch(
         batch = {key: torch.stack([to_chw01(transform(r[raw])) for r in raws]) for key, raw in cams}
         batch["observation.state"] = torch.from_numpy(np.stack([build_state(r) for r in raws]))
         batch["task"] = list(instructions)
-        with autocast_ctx():
+        with autocast():
             action = policy.select_action(preprocessor(batch))
         action = postprocessor(action).float().cpu().numpy()
 
@@ -329,16 +295,16 @@ def main():
     p.add_argument("--verify-obs", action="store_true")
     args = p.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda":
-        torch.cuda.set_device(_LOCAL_RANK)
+    # long timeout: ranks finish at very different times
+    device = D.setup(timeout=timedelta(hours=2))
 
     if args.verify_obs:
         verify_obs(args, device)
+        D.cleanup()
         return
 
-    R = Rank()
-    torch.manual_seed(args.seed + 1000 * R.rank)
+    rank, world = D.rank(), D.world_size()
+    torch.manual_seed(args.seed + 1000 * rank)
 
     from libero.libero import benchmark, get_libero_path
 
@@ -352,22 +318,18 @@ def main():
     train_tasks = {str(t[0]) for t in stats_meta.episodes.to_pandas()["tasks"]}
     for tid in task_ids:
         lang = suite.get_task(tid).language
-        if lang not in train_tasks and R.rank == 0:
+        if lang not in train_tasks and rank == 0:
             print(f"[warn] task {tid} instruction {lang!r} is absent from {args.dataset}")
 
     policy, cfg, preprocessor, postprocessor, cams = load_policy(args, device, stats_meta)
-    autocast_ctx = (
-        (lambda: torch.autocast("cuda", dtype=torch.bfloat16))
-        if args.bf16 and device.type == "cuda"
-        else contextlib.nullcontext
-    )
+    autocast = autocast_ctx(args.bf16 and device.type == "cuda")
 
     # deal (task, trial) round-robin so each rank gets a mix of tasks
     jobs = [(tid, ep) for tid in task_ids for ep in range(args.episodes_per_task)]
-    mine = jobs[R.rank :: R.world]
-    if R.rank == 0:
+    mine = jobs[rank::world]
+    if rank == 0:
         print(
-            f"{len(jobs)} episodes over {len(task_ids)} tasks, {R.world} rank(s), "
+            f"{len(jobs)} episodes over {len(task_ids)} tasks, {world} rank(s), "
             f"{args.envs_per_rank} env(s)/rank, n_action_steps={cfg.n_action_steps}, "
             f"max_steps={max_steps}, transform={args.image_transform}",
             flush=True,
@@ -400,7 +362,7 @@ def main():
                     max_steps,
                     transform,
                     device,
-                    autocast_ctx,
+                    autocast,
                     cams,
                 )
                 for ep, s, st in zip(chunk, succ, steps, strict=True):
@@ -409,7 +371,7 @@ def main():
                     )
                 nd = sum(r["success"] for r in results)
                 print(
-                    f"[rank {R.rank}] task {tid} {i + len(chunk)}/{len(eps)} "
+                    f"[rank {rank}] task {tid} {i + len(chunk)}/{len(eps)} "
                     f"running {nd}/{len(results)}",
                     flush=True,
                 )
@@ -417,9 +379,9 @@ def main():
             for e in pool:
                 e.close()
 
-    gathered = [r for part in R.gather(results) for r in part]
+    gathered = [r for part in D.gather_object(results) for r in part]
 
-    if R.rank == 0:
+    if rank == 0:
         per_task = defaultdict(list)
         for r in gathered:
             per_task[r["task_id"]].append(r["success"])
@@ -459,7 +421,7 @@ def main():
                 indent=2,
             )
             print(f"wrote {args.out}")
-    R.close()
+    D.cleanup()
 
 
 if __name__ == "__main__":

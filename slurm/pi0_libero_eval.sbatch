@@ -29,7 +29,7 @@ run () {  # name, extra args...
   local t0=$SECONDS
   srun torchrun --nnodes=1 --nproc_per_node=$NGPU \
     --rdzv_backend=c10d --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
-    scripts/eval_libero.py \
+    -m scripts.eval_libero \
       --suite libero_spatial \
       --episodes-per-task "$EPT" \
       --envs-per-rank 8 \
@@ -43,7 +43,7 @@ run () {  # name, extra args...
 echo "================ sanity: lora, 2 tasks x 4 trials ================"
 srun torchrun --nnodes=1 --nproc_per_node=$NGPU \
   --rdzv_backend=c10d --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
-  scripts/eval_libero.py --suite libero_spatial \
+  -m scripts.eval_libero --suite libero_spatial \
     --policy lerobot/pi0 --adapter "$CKPT_ROOT/pi0_libero/adapter_best" \
     --task-ids 0 1 --episodes-per-task 4 --envs-per-rank 2 \
     --n-action-steps "$NSTEPS" --out results/sanity_lora.json

@@ -3,7 +3,7 @@
 The checkpoint is uploaded in place with its own README ignored (PEFT regenerates it), and
 the card is uploaded as README.md. Nothing is staged, so read-only checkpoints work.
 
-    python scripts/publish_to_hub.py --dry-run \
+    python -m scripts.publish_to_hub --dry-run \
         --checkpoint $VLA_RUNS/pi0_libero/adapter_best \
         --card model_cards/pi0-libero-spatial-lora.md \
         --repo-id dmnsjk/pi0-libero-spatial-lora --private
