@@ -9,16 +9,7 @@
 #SBATCH -o logs/%x-%j.out
 set -euo pipefail
 
-# Does adding GPUs actually buy wall clock here?
-#
-# pi0+LoRA fits on one 40 GB card (~10 GiB), so multi-GPU is a *throughput* choice,
-# not a capacity one. LIBERO ships PNG frames, so dataloading is CPU-bound decode over
-# ~106k small files on Lustre — which is exactly the shape of workload that scales
-# sublinearly. This measures it instead of assuming.
-#
-# EFFECTIVE BATCH IS HELD CONSTANT at 128 by moving grad_accum inversely to world
-# size, so every configuration does identical math on identical data and only the
-# parallelism changes. Same total samples per config => elapsed time is comparable.
+# LoRA DDP throughput at 1/2/4 GPUs with the effective batch held at 128.
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
@@ -30,8 +21,7 @@ BS=16
 STEPS=20          # optimizer steps, after 5 warmup steps that are excluded from timing
 EFFECTIVE=128     # held constant across every configuration below
 
-# Workers per rank scale with world size so each rank keeps a full share of the CPUs.
-# Starving the input pipeline would make this measure the dataloader, not the GPUs.
+# workers per rank scale with world size so the dataloader is not the bottleneck
 for N in 1 2 4; do
   ACCUM=$(( EFFECTIVE / (BS * N) ))
   WORKERS=$(( SLURM_CPUS_PER_TASK / N - 2 ))

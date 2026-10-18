@@ -12,10 +12,10 @@ Each of these has failed here at least once, and every one of them fails at the
   - the LIBERO sim stack half-installed: robosuite's GUI `opencv-python` clobbering the
     headless `cv2`, or `libero` hitting its import-time `input()` with no config path
 
-The sim stack is optional — training never touches it — so its check reports ABSENT
+The sim stack is optional - training never touches it - so its check reports ABSENT
 rather than failing when it is simply not installed.
 
-Run on a compute node — the GPU checks need a real device:
+Run on a compute node - the GPU checks need a real device:
 
     srun -p plgrid-now -A <account> --gres=gpu:1 -t 00:10:00 \
         python scripts/verify_env.py
@@ -39,7 +39,7 @@ class Absent(Exception):
 
     Only the sim stack is optional: `uv sync` deliberately leaves it out, so a
     training-only environment is *correct* without it. A component that is present
-    but broken still fails — a half-installed sim stack is worse than none, because
+    but broken still fails - a half-installed sim stack is worse than none, because
     it surfaces inside a SLURM allocation instead of here.
     """
 
@@ -47,7 +47,7 @@ class Absent(Exception):
 def check(name: str):
     """Decorator: run a check, record failure, keep going.
 
-    Deliberately does not stop at the first failure — knowing that three things
+    Deliberately does not stop at the first failure - knowing that three things
     are broken in one run beats discovering them one submission at a time.
     """
     def wrap(fn):
@@ -130,7 +130,7 @@ def _lerobot():
     except ImportError:
         from lerobot.datasets.lerobot_dataset import CODEBASE_VERSION
     print(f"    lerobot {md.version('lerobot')}  CODEBASE_VERSION={CODEBASE_VERSION}")
-    print(f"    transformers {md.version('transformers')} (stock — 0.4.x needed a fork)")
+    print(f"    transformers {md.version('transformers')} (stock - 0.4.x needed a fork)")
     # LIBERO ports are tagged v3.0 only; on a v2.1 lerobot they are unreachable.
     assert CODEBASE_VERSION.startswith("v3"), (
         f"{CODEBASE_VERSION} cannot fetch the v3.0-tagged LIBERO datasets"
@@ -179,10 +179,10 @@ def _libero():
     import os
 
     # Safe to ask first: find_spec executes nothing, and the top-level `libero/__init__.py`
-    # is empty anyway — the interactive prompt lives one level down in `libero/libero/`.
+    # is empty anyway - the interactive prompt lives one level down in `libero/libero/`.
     if importlib.util.find_spec("libero") is None:
         raise Absent(
-            "not installed — training does not need it. Closed-loop rollouts do; "
+            "not installed - training does not need it. Closed-loop rollouts do; "
             "see README, \"Simulator, for evaluation only\"."
         )
 
@@ -192,9 +192,9 @@ def _libero():
     # never creates the config, so asserting on the variable alone would pass here and then
     # hang on the import below.
     cfg_dir = os.environ.get("LIBERO_CONFIG_PATH")
-    assert cfg_dir, "LIBERO_CONFIG_PATH is unset — source slurm/common.sh first"
+    assert cfg_dir, "LIBERO_CONFIG_PATH is unset - source slurm/common.sh first"
     assert Path(cfg_dir, "config.yaml").is_file(), (
-        f"{cfg_dir}/config.yaml does not exist — importing libero would prompt via input() "
+        f"{cfg_dir}/config.yaml does not exist - importing libero would prompt via input() "
         "and hang this job. Create it first; see README, \"Simulator\"."
     )
 
@@ -243,9 +243,9 @@ def _libero():
     print(f"    assets: {assets}" + (f" -> {target}" if assets.is_symlink() else ""))
     # Informational: a real directory under $HOME is the quota problem, not an error.
     if not target.is_absolute() or str(target.resolve()).startswith(str(Path.home())):
-        print(f"    note: assets live under $HOME ({target}) — watch the quota")
+        print(f"    note: assets live under $HOME ({target}) - watch the quota")
 
-    # Imports and task metadata only. This does NOT prove the EGL renderer works — that
+    # Imports and task metadata only. This does NOT prove the EGL renderer works - that
     # needs MUJOCO_GL=egl on a compute node, and is exercised by scripts/eval_libero.py.
 
 

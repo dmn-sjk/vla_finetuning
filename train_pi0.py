@@ -1,13 +1,4 @@
-"""Phase 2: LoRA fine-tuning of pi0 on LIBERO, native torch.distributed.
-
-Runs identically at world size 1 (`python train_pi0.py`) and under torchrun, using the
-distributed scaffolding in src/dist_utils.
-
-What it does:
-  - the model is pi0 (~4B) from lerobot, frozen except for LoRA adapters
-  - batches come from LeRobotDataset and go through lerobot's processor pipeline
-  - checkpoints save the *adapter*, not the base weights, since only the adapter trains
-"""
+"""LoRA fine-tuning of pi0 on LIBERO with native DDP. Runs as plain python or under torchrun."""
 
 import argparse
 import contextlib
@@ -33,31 +24,17 @@ from src import dist_utils as D
 from src.paths import run_dir
 
 
-# pi0's Linear modules fall into four groups (names dumped from the loaded model):
-#
-#   model.paligemma_with_expert.paligemma.model.language_model.layers.N.{self_attn,mlp}.*
-#   model.paligemma_with_expert.gemma_expert.model.layers.N.{self_attn,mlp}.*
-#   model.paligemma_with_expert.paligemma.model.vision_tower...encoder.layers.N.*
-#   model.{state_proj,action_in_proj,action_out_proj,action_time_mlp_in,action_time_mlp_out}
-#
-# PEFT treats a string `target_modules` as a regex matched with re.fullmatch against
-# the module path, which is why every pattern here is anchored with `.*`.
-#
-# The vision tower is deliberately excluded from all presets: SigLIP features transfer
-# well across manipulation tasks, and adapting them on 428 episodes is the fastest way
-# to damage the part of the model doing the most generalisation work.
+# PEFT fullmatches a string target_modules against the module path, hence the `.*` anchors.
+# The vision tower is excluded on purpose: SigLIP features transfer well and are easy to damage.
 _PROJECTIONS = "state_proj|action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out"
 _TOWERS = "gemma_expert|language_model"
 
 LORA_TARGETS = {
-    # lerobot's own default: action expert q/v only. ~0.7M params at r=8 (0.017%) —
-    # kept so runs against the library default remain reproducible.
+    # lerobot default: action-expert q/v
     "default": rf"(.*\.gemma_expert\..*\.self_attn\.(q|v)_proj|model\.({_PROJECTIONS}))",
-    # Recommended: full attention (q,k,v,o) on BOTH the VLM backbone and the action
-    # expert. ~12.7M at r=32 (0.31%), a normal LoRA operating point.
+    # q,k,v,o on both towers
     "attention": rf"(.*\.({_TOWERS})\..*\.self_attn\.(q|k|v|o)_proj|model\.({_PROJECTIONS}))",
-    # Aggressive: attention + MLP on both towers. ~53M at r=32 (1.3%). More capacity,
-    # more overfitting risk on a single 428-episode suite.
+    # attention + MLP on both towers
     "attention-mlp": (
         rf"(.*\.({_TOWERS})\..*\.(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)"
         rf"|model\.({_PROJECTIONS}))"
@@ -73,7 +50,7 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=0, help="0 = no cap; for smoke tests")
     p.add_argument("--batch-size", type=int, default=8, help="per device")
     p.add_argument("--grad-accum", type=int, default=2)
-    p.add_argument("--lr", type=float, default=1e-4, help="LoRA tolerates more than the 2.5e-5 full-FT default")
+    p.add_argument("--lr", type=float, default=1e-4, help="default suits LoRA; full FT uses 2.5e-5")
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--seed", type=int, default=42)
@@ -86,7 +63,6 @@ def parse_args():
     p.add_argument("--lora-alpha", type=int, default=64)
     p.add_argument("--lora-dropout", type=float, default=0.05)
     p.add_argument("--grad-checkpointing", action="store_true")
-    # bf16 on by default (A100 supports it); --no-bf16 falls back for debugging numerics.
     p.add_argument("--no-bf16", dest="bf16", action="store_false", default=True)
     p.add_argument(
         "--out",
@@ -96,29 +72,17 @@ def parse_args():
     p.add_argument("--resume", action="store_true", help="resume from out/last.pt if present")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--log-every", type=int, default=10)
-    # Throughput timing starts only after this many optimizer steps, so model load,
-    # cuDNN autotuning and the first allocator growth don't pollute the measurement.
-    p.add_argument("--warmup-steps", type=int, default=5)
-    # Required whenever LoRA is attached to the VLM tower (`attention`, `attention-mlp`):
-    # pi0 consumes only the prefix KV cache from PaliGemma, so the *final* language-model
-    # layer's o_proj output feeds nothing and its adapter receives no gradient. DDP then
-    # aborts with "Expected to have finished reduction in the prior iteration".
-    # Measured: exactly 2 of 298 trainable tensors are affected.
-    # Safe to disable for --lora-target default, which adapts only the action expert.
+    p.add_argument("--warmup-steps", type=int, default=5,
+                   help="optimizer steps before throughput timing starts")
     p.add_argument("--no-find-unused-parameters", dest="find_unused_parameters",
-                   action="store_false", default=True)
+                   action="store_false", default=True,
+                   help="disable find_unused_parameters; only safe with --lora-target default")
     return p.parse_args()
 
 
 def build_datasets(args, meta, cfg):
-    """Split by *episode*, not by frame.
-
-    Consecutive frames in a trajectory are near-duplicates, so a frame-level split
-    leaks almost the whole validation set into training and the val curve becomes
-    meaningless. Holding out whole episodes is the only honest split here.
-    """
-    # pi0 predicts an action chunk, so the dataset must return a window of future
-    # actions. lerobot derives the window from the config's delta indices.
+    """Split by episode: adjacent frames are near-duplicates."""
+    # pi0 predicts action chunks
     delta_timestamps = resolve_delta_timestamps(cfg, meta)
 
     n_val = min(args.val_episodes, max(1, meta.total_episodes // 10))
@@ -134,8 +98,7 @@ def build_datasets(args, meta, cfg):
 def build_loaders(args, train_ds, val_ds):
     train_sampler = val_sampler = None
     if D.is_distributed():
-        # drop_last keeps every rank's epoch the same length, so no rank runs out of
-        # batches early and deadlocks the others at the next collective.
+        # drop_last keeps ranks in lockstep
         train_sampler = DistributedSampler(train_ds, shuffle=True, drop_last=True)
         val_sampler = DistributedSampler(val_ds, shuffle=False)
 
@@ -154,16 +117,12 @@ def build_loaders(args, train_ds, val_ds):
 
 
 def trainable_state_dict(policy) -> dict:
-    """Only the LoRA parameters — the base 4B is frozen and already on the Hub."""
+    """Only the LoRA parameters; the frozen base is on the Hub."""
     return {k: v.detach().cpu() for k, v in policy.state_dict().items() if "lora" in k.lower()}
 
 
 def _export_adapter(raw, dest: Path):
-    """Write a PEFT adapter directory, swapping it in only once complete.
-
-    `save_pretrained` writes several files, so a crash midway leaves a directory that
-    looks loadable but isn't. Build beside the target, then rename.
-    """
+    """Write a PEFT adapter dir atomically (build beside, then rename)."""
     tmp = dest.with_suffix(".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
     raw.save_pretrained(tmp)
@@ -173,16 +132,8 @@ def _export_adapter(raw, dest: Path):
 
 def save_checkpoint(args, path: Path, policy, optimizer, epoch: int, global_step: int,
                     best_val: float, is_best: bool):
-    """Rank-0 only, written atomically.
-
-    A torn checkpoint on Lustre is worse than no checkpoint, and long runs mean we will
-    need to resume at least once.
-
-    Two artefacts, because they answer different questions:
-      - `last.pt` + `adapter/`      -> resume the run where it stopped
-      - `best.pt` + `adapter_best/` -> the adapter that actually generalises best
-    pi0+LoRA overfits LIBERO-spatial after ~5 epochs, so the final epoch is routinely
-    *worse* than the best one. Publishing `adapter/` would ship the wrong weights.
+    """Rank-0 only, atomic. `last.pt` resumes the run and `adapter/` is its export;
+    `best.pt`/`adapter_best` hold the best val epoch.
     """
     if not D.is_main_process():
         return
@@ -199,8 +150,6 @@ def save_checkpoint(args, path: Path, policy, optimizer, epoch: int, global_step
     torch.save(payload, tmp)
     os.replace(tmp, path)
 
-    # PEFT's own layout — what gets pushed to the Hub (deliverable #2) and what
-    # `PeftModel.from_pretrained` expects.
     _export_adapter(raw, args.out / "adapter")
     if is_best:
         torch.save(payload, args.out / "best.pt.tmp")
@@ -215,27 +164,15 @@ def load_checkpoint(path: Path, policy, optimizer, device):
     if unexpected:
         raise RuntimeError(f"checkpoint has {len(unexpected)} unexpected keys, e.g. {unexpected[:3]}")
     optimizer.load_state_dict(ckpt["optimizer"])
-    # Carry best_val across a resume, or the first post-resume epoch always looks like
-    # an improvement and overwrites a genuinely better adapter.
+    # keep best_val across resume so a worse epoch cannot overwrite adapter_best
     return ckpt["epoch"], ckpt["global_step"], ckpt.get("best_val", float("inf"))
 
 
 @torch.no_grad()
 def evaluate(policy, loader, preprocessor, autocast_ctx, device, seed: int = 1234):
-    """Validation loss. Note this is a *stochastic* estimate, not a fixed property of
-    the weights: pi0 is a flow-matching model, so every forward samples a diffusion
-    timestep and a noise vector.
+    """Mean val loss across ranks.
 
-    The per-rank seed offset matters. Every rank starts from the same
-    `torch.manual_seed(args.seed)` and executes the same op sequence, so without an
-    offset all ranks draw the *same* timestep sequence. That correlates the noise
-    across ranks, cutting the number of independent draws by a factor of world_size
-    and inflating the variance of the reduced estimate by roughly sqrt(world_size)
-    instead of averaging it down. Measured effect: training-time val loss scattered
-    +-0.007 around the true value (0.3343 +- 0.0015 from a seeded single-process eval),
-    which is large enough to reorder adjacent epochs and pick the wrong "best".
-
-    RNG state is saved and restored so seeding here cannot perturb training.
+    Stochastic (flow matching), so seeded per rank; RNG state is restored afterwards.
     """
     cpu_state = torch.random.get_rng_state()
     cuda_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
@@ -250,7 +187,7 @@ def evaluate(policy, loader, preprocessor, autocast_ctx, device, seed: int = 123
         bs = batch["action"].shape[0]
         loss_sum += loss.item() * bs
         n_seen += bs
-    # Reduce sums, not means: ranks may hold different sample counts.
+    # reduce sums, not means: ranks may hold different sample counts
     total_loss = D.all_reduce_sum(loss_sum, device)
     total_n = D.all_reduce_sum(float(n_seen), device)
     policy.train()
@@ -265,8 +202,7 @@ def main():
     args = parse_args()
     device = D.setup()
 
-    # Same seed on every rank so LoRA init is identical; the sampler, not the seed,
-    # is what makes ranks see different data.
+    # same seed on every rank so LoRA init matches; the sampler splits the data
     torch.manual_seed(args.seed)
 
     meta = LeRobotDatasetMetadata(args.dataset)
@@ -304,9 +240,6 @@ def main():
     trainable = [p for p in policy.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
     n_total = sum(p.numel() for p in policy.parameters())
-    # A target_modules regex that matches nothing still "succeeds" and silently yields
-    # an adapter that trains almost nothing — assert instead of discovering it in the
-    # loss curve two hours later.
     if n_trainable < 1e6:
         raise RuntimeError(
             f"only {n_trainable} trainable params for --lora-target={args.lora_target}; "
@@ -319,8 +252,6 @@ def main():
             device_ids=[D.local_rank()] if device.type == "cuda" else None,
             find_unused_parameters=args.find_unused_parameters,
         )
-    # Only LoRA params are passed to the optimizer, so no optimizer state is
-    # allocated for the frozen 4B — that is most of the memory saving.
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=args.weight_decay)
 
     use_bf16 = args.bf16 and device.type == "cuda" and torch.cuda.is_bf16_supported()
@@ -360,14 +291,10 @@ def main():
 
     policy.train()
     stop = False
-    # Throughput is measured in samples/s across all ranks, not steps/s: when the
-    # effective batch is held constant while scaling GPUs, grad_accum changes
-    # inversely, so steps/s is not comparable between world sizes but samples/s is.
+    # samples/s, not steps/s: grad_accum varies with world size in scaling runs
     timer_start, timed_samples = None, 0
 
     for epoch in range(start_epoch, args.epochs):
-        # Without this, every rank reshuffles identically each epoch and the sharding
-        # silently degrades. Costs one line, invisible on 1 GPU.
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -376,9 +303,7 @@ def main():
             batch = preprocessor(raw)
             is_accum = (i + 1) % args.grad_accum != 0
 
-            # Skip the gradient all-reduce on micro-batches that are not the last of
-            # their accumulation window — this is where most of the speedup from
-            # gradient accumulation actually comes from.
+            # skip all-reduce on accumulation micro-batches
             sync_ctx = policy.no_sync if (isinstance(policy, DDP) and is_accum) else contextlib.nullcontext
             with sync_ctx():
                 with autocast_ctx():
@@ -397,8 +322,6 @@ def main():
                 global_step += 1
 
                 if global_step == args.warmup_steps:
-                    # Barrier first so the clock starts with every rank at the same
-                    # point; otherwise a straggler's startup lands inside the window.
                     if device.type == "cuda":
                         torch.cuda.synchronize()
                     D.barrier()
@@ -406,8 +329,6 @@ def main():
 
                 if global_step % args.log_every == 0:
                     avg = running / max(seen, 1)
-                    # Peak VRAM in the progress line, not just W&B: on 40 GB cards the
-                    # headroom is the number you actually need while tuning batch size.
                     vram = torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0
                     D.print0(
                         f"epoch {epoch} step {global_step} loss {avg:.4f} peak_vram {vram:.1f}GiB"
@@ -434,15 +355,11 @@ def main():
 
         save_checkpoint(args, ckpt_path, policy, optimizer, epoch + 1, global_step,
                         best_val, is_best)
-        # Hold every rank until the write lands, so a crash mid-save cannot leave
-        # ranks disagreeing about what the last good checkpoint is.
         D.barrier()
         if stop:
             D.print0(f"stopping at max_steps={args.max_steps}")
             break
 
-    # One machine-greppable line so a scaling sweep can be tabulated without parsing
-    # the whole log. Printed even when the run was cut short by --max-steps.
     if timer_start is not None:
         if device.type == "cuda":
             torch.cuda.synchronize()
@@ -458,8 +375,7 @@ def main():
         )
 
     D.print0(
-        f"best val_loss {best_val:.4f}; publish {args.out / 'adapter_best'} "
-        f"(NOT {args.out / 'adapter'}, which is the final epoch)"
+        f"best val_loss {best_val:.4f}; best adapter: {args.out / 'adapter_best'}"
     )
     if run is not None:
         run.summary["val/best_loss"] = best_val

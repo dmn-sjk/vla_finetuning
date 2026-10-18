@@ -9,24 +9,16 @@
 #SBATCH -o logs/%x-%j.out
 set -euo pipefail
 
-# Base pi0 vs LoRA vs full fine-tuning, measured the same way on the same episodes.
-#
-# The numbers in the training logs are NOT comparable: they come from different eval
-# batch sizes, and the LoRA figure predates the `--repeats` seeding fix in
-# scripts/eval_adapter.py. This job re-measures all three checkpoints with one script, one
-# batch size and one set of seeds, which is the only way the comparison means anything.
-#
-# Base pi0 is measured as the reference: without it, "0.33" is a number with no scale.
+# Val loss of base pi0, LoRA and full FT under one protocol (same episodes, batch size, seeds).
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
-# Finished checkpoints are read from where training left them; export CKPT_ROOT to
-# evaluate an archived copy instead (same convention as pi0_libero_eval.sbatch).
+# export CKPT_ROOT to evaluate an archived copy
 CKPT_ROOT=${CKPT_ROOT:-$VLA_RUNS}
 
 COMMON="--val-episodes 40 --batch-size 8 --num-workers 6 --repeats 3"
 
-# Collected separately: grep cannot read this job's own log while SLURM is writing it.
+# collected separately: grep cannot read this job's own log while SLURM writes it
 RESULTS=$(mktemp)
 trap 'rm -f "$RESULTS"' EXIT
 

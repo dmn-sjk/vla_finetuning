@@ -1,14 +1,7 @@
-"""Publish a checkpoint to the Hugging Face Hub with the repo's own model card.
+"""Publish a checkpoint to the Hugging Face Hub with its card from model_cards/.
 
-The card lives in `model_cards/` rather than inside the run directory because PEFT
-regenerates `adapter_best/README.md` on every export, so anything hand-written there is one
-re-export away from being replaced by a stub full of `[More Information Needed]`.
-
-Nothing is staged to a temp directory. The checkpoint is uploaded in place with its own
-README ignored, and the card is uploaded separately as `README.md`. That avoids copying a
-7.6 GB checkpoint through `$TMPDIR` and, just as importantly, works when the checkpoint tree
-is read-only -- which it should be, since these are the artefacts of runs nobody wants to
-repeat.
+The checkpoint is uploaded in place with its own README ignored (PEFT regenerates it), and
+the card is uploaded as README.md. Nothing is staged, so read-only checkpoints work.
 
     python scripts/publish_to_hub.py --dry-run \
         --checkpoint $VLA_RUNS/pi0_libero/adapter_best \
@@ -30,9 +23,8 @@ def main():
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--card", type=Path, required=True)
     p.add_argument("--repo-id", required=True)
-    # NOTE: private only takes effect when the repo is CREATED. exist_ok=True will not
-    # downgrade an already-public repo; use HfApi.update_repo_settings for that.
-    p.add_argument("--private", action="store_true")
+    p.add_argument("--private", action="store_true",
+                   help="applies only when the repo is created")
     p.add_argument("--dry-run", action="store_true", help="list what would upload, upload nothing")
     args = p.parse_args()
 
@@ -64,13 +56,7 @@ def main():
     api = HfApi(token=token)
     api.create_repo(args.repo_id, private=args.private, exist_ok=True, repo_type="model")
 
-    # PEFT writes `"task_type": null` for a policy that is not one of its standard task types,
-    # and the Hub's config parser then shows on the model page:
-    #   Configuration Parsing Warning: In adapter_config.json: "peft.task_type" must be a string
-    # Dropping the key parses identically -- PeftConfig.from_pretrained yields the same
-    # LoraConfig with task_type=None either way -- so publish a copy without it. PEFT
-    # regenerates this file on every export, so the sanitising belongs here rather than
-    # only in the saved checkpoint.
+    # the Hub warns on PEFT's `"task_type": null`; dropping the key loads identically
     ignore = ["README.md"]
     sanitized = None
     acfg = args.checkpoint / "adapter_config.json"

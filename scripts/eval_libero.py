@@ -1,29 +1,8 @@
-"""Closed-loop LIBERO rollouts: the success-rate metric the literature actually reports.
+"""Closed-loop LIBERO rollouts of a pi0 checkpoint; reports task success rate.
 
-Validation loss says how well the policy predicts a held-out expert action chunk. It says
-nothing about whether the robot puts the bowl on the plate, and pi0/OpenVLA LIBERO tables
-are success rates. This script closes that gap so our numbers are comparable to published
-ones instead of merely internally consistent.
+Protocol: 10 tasks x 50 trials from the suite's saved initial states, suite step cap.
 
-Protocol follows the LIBERO/OpenVLA convention, which is what the published tables use:
-  * all 10 tasks of a suite, 50 trials per task, trial i starting from the suite's i-th
-    saved initial state (deterministic, not random) -> 500 episodes;
-  * 10 no-op steps after reset so objects settle before the first observation;
-  * episode capped at the suite's own step budget (280 for spatial), counted as a failure
-    if the goal predicate never fires.
-
-Observation format is the *dataset's*, not lerobot's LiberoEnv default. The port we trained
-on (`lerobot/libero_spatial_image`) uses `observation.images.image` +
-`observation.images.wrist_image` and a single 8-D state
-`[eef_pos(3), eef_axis_angle(3), gripper_qpos(2)]`, whereas lerobot's own LIBERO env config
-emits `image`/`image2` and a dict of separate state keys. Feeding the policy the latter
-would run, and would quietly score near zero. `--verify-obs` checks the images we build
-against real dataset frames before any of that can bite.
-
-    # one-off: confirm camera orientation matches the training data
-    srun ... python scripts/eval_libero.py --verify-obs
-
-    # the real thing, 8 ranks x 8 envs
+    python scripts/eval_libero.py --verify-obs
     torchrun --nproc_per_node=8 scripts/eval_libero.py \
         --adapter <run>/adapter_best --out results/lora.json
 """
@@ -40,9 +19,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# MuJoCo must pick its renderer before robosuite imports it. On Athena's compute nodes
-# libEGL_nvidia.so.0 is present and there is no X server, so EGL is the only option that
-# works headless; osmesa is not installed. Each rank renders on its own GPU.
+# renderer must be chosen before robosuite is imported; one GPU per rank
 os.environ.setdefault("MUJOCO_GL", "egl")
 _LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
 os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", str(_LOCAL_RANK))
@@ -57,8 +34,7 @@ from lerobot.policies.factory import make_policy, make_pre_post_processors  # no
 from lerobot.policies.pi0.configuration_pi0 import PI0Config  # noqa: E402
 from lerobot.utils.constants import ACTION  # noqa: E402
 
-# LIBERO's own per-suite step budgets (lerobot/envs/libero.py mirrors these). A cap that is
-# too tight turns slow-but-correct rollouts into failures and understates the policy.
+# LIBERO's own per-suite step budgets
 SUITE_MAX_STEPS = {
     "libero_spatial": 280,
     "libero_object": 280,
@@ -66,10 +42,7 @@ SUITE_MAX_STEPS = {
     "libero_10": 520,
     "libero_90": 400,
 }
-# Which LIBERO camera feeds which policy input. Ports disagree on the naming:
-# `lerobot/libero_spatial_image` calls the wrist camera `wrist_image`, while
-# `HuggingFaceVLA/libero` calls it `image2`. Feeding the wrong one runs silently and scores
-# ~0%, so the mapping is resolved from the loaded config rather than assumed.
+# maps policy image keys to LIBERO cameras; dataset ports name the wrist camera differently
 CAMERA_ALIASES = {
     "observation.images.image": "agentview_image",
     "observation.images.wrist_image": "robot0_eye_in_hand_image",
@@ -79,11 +52,7 @@ CAMERA_ALIASES = {
 NUM_STEPS_WAIT = 10  # settle steps after reset, before the policy sees anything
 DUMMY_ACTION = np.array([0, 0, 0, 0, 0, 0, -1], dtype=np.float32)
 
-# robosuite renders origin-bottom-left AND mirrored, so the RLDS->LeRobot port rotates the
-# frame 180 degrees. Measured, not assumed -- --verify-obs (job 3108456) scored the four
-# candidates against real dataset frames and rot180 won by an order of magnitude on both
-# cameras (agentview MSE 0.006 vs 0.064-0.095, wrist 0.015 vs 0.089-0.136). Any other choice
-# runs perfectly and scores near zero, with nothing in the logs to explain it.
+# the dataset port rotates frames 180 degrees; check with --verify-obs
 IMAGE_TRANSFORMS = {
     "none": lambda a: a,
     "flipud": lambda a: a[::-1],
@@ -93,7 +62,7 @@ IMAGE_TRANSFORMS = {
 
 
 def quat2axisangle(quat):
-    """robosuite's xyzw quaternion -> axis*angle, the 3 middle dims of the dataset state."""
+    """robosuite xyzw quaternion to axis-angle, the 3 middle dims of the dataset state."""
     from robosuite.utils.transform_utils import quat2axisangle as _q2aa
 
     return _q2aa(np.asarray(quat))
@@ -106,7 +75,7 @@ def build_state(raw):
 
 
 def to_chw01(img_hwc_uint8):
-    """Environment frame -> the float32 CHW [0,1] tensor the dataset loader produces."""
+    """Environment frame to the float32 CHW [0,1] tensor the dataset loader produces."""
     a = np.ascontiguousarray(img_hwc_uint8)
     return torch.from_numpy(a).permute(2, 0, 1).float().div_(255.0)
 
@@ -120,11 +89,7 @@ class Rank:
         self.local = _LOCAL_RANK
         self.dist = self.world > 1
         if self.dist:
-            # The only collective is the final gather, which blocks until every rank has
-            # finished all of its episodes. Ranks are dealt an even count but not an even
-            # amount of *work* -- a successful episode terminates early, a failed one runs
-            # the full 280 steps -- so skew of tens of minutes is normal and NCCL's default
-            # timeout would abort a run that is merely uneven.
+            # long timeout: ranks finish at very different times
             dist.init_process_group(backend="nccl", timeout=timedelta(hours=2))
 
     def gather(self, obj):
@@ -142,23 +107,12 @@ class Rank:
 
 def load_policy(args, device, stats_meta):
     if args.from_pretrained_config:
-        # PI0Config(pretrained_path=...) is a plain dataclass constructor: it does NOT read
-        # the checkpoint's config.json, so input_features come out empty and get filled from
-        # --dataset, and structural fields keep library defaults (notably empty_cameras=0).
-        # That is fine for our own checkpoints, which were trained under exactly those
-        # defaults, but silently misconfigures a third-party one. from_pretrained inherits
-        # the checkpoint's real structure -- for lerobot/pi0_libero_finetuned_v044 that means
-        # cameras image/image2 plus one empty padding slot (3 image tokens, as openpi's
-        # LIBERO setup uses), rather than our 2.
+        # inherit the checkpoint's structure (cameras, empty_cameras) from its config.json
         cfg = PI0Config.from_pretrained(args.policy)
         cfg.pretrained_path = args.policy
         cfg.device = device.type
         cfg.dtype = "bfloat16" if args.bf16 else "float32"
-        # compile_model is a throughput setting, not a semantic one, and inheriting it turns
-        # on inductor max-autotune -- which shells out to nvcc and dies with
-        # "PermissionError: [Errno 13] Permission denied: 'nvcc'" on these nodes (job
-        # 3111066). Our own checkpoints ship compile_model=false, so forcing it off here also
-        # keeps every row of the comparison on the same execution path.
+        # compile_model needs nvcc, which compute nodes lack
         cfg.compile_model = False
     else:
         cfg = PI0Config(
@@ -181,9 +135,7 @@ def load_policy(args, device, stats_meta):
         "norm_map": cfg.normalization_mapping,
     }
     if args.checkpoint_stats:
-        # Third-party checkpoints ship the stats they were trained with. Overriding them
-        # with --dataset's would misscale their actions -- the same class of fault as the
-        # missing unnormalization this script now guards against.
+        # third-party checkpoints ship the stats they were trained with
         pre_over = {"device_processor": {"device": device.type}}
         post_over = {}
     else:
@@ -193,18 +145,12 @@ def load_policy(args, device, stats_meta):
         cfg,
         pretrained_path=args.policy,
         preprocessor_overrides=pre_over,
-        # The POST-processor needs the same stats. Without this it keeps whatever the
-        # pretrained checkpoint shipped, the predicted actions are never mapped out of
-        # normalized space, and every rollout drives the arm with z-scores -- ~25x too large
-        # on the rotation dims. Nothing raises; the policy simply fails every task.
-        # A validation loss cannot catch this: computing a loss only uses the preprocessor.
+        # the unnormalizer needs the training stats too
         postprocessor_overrides=post_over,
     )
     _assert_unnormalizes(postprocessor, stats_meta, cfg, args)
 
-    # Resolve camera wiring from the config the policy actually loaded. Keys the config
-    # declares but we cannot supply (pi0's `empty_camera_*` padding slots) are left out
-    # deliberately -- _preprocess_images fills them with -1 and a zero attention mask.
+    # skip empty_camera_* padding slots: pi0 fills them itself
     cams = []
     for key in cfg.image_features:
         if "empty_camera" in key:
@@ -222,21 +168,14 @@ def load_policy(args, device, stats_meta):
 
 
 def _assert_unnormalizes(postprocessor, stats_meta, cfg, args):
-    """Push a zero action through the postprocessor and check it lands in dataset units.
-
-    pi0 normalizes actions with MEAN_STD, so unnormalizing zeros must return the action mean.
-    If the stats are missing or identity the result stays exactly zero. This is the functional
-    version of the check -- it tests the pipeline that actually runs, not the presence of a
-    config key.
-    """
+    """Check the postprocessor maps a zero action to the dataset action mean (MEAN_STD)."""
     import numpy as _np
 
     mean = _np.asarray(stats_meta.stats["action"]["mean"], dtype=_np.float32)
     dim = cfg.output_features[ACTION].shape[0]
     got = postprocessor(torch.zeros(1, cfg.chunk_size, dim)).float().cpu().numpy()[0, 0]
     if args.checkpoint_stats:
-        # The checkpoint's own stats need not match --dataset's, so only require that
-        # unnormalization is happening at all.
+        # the checkpoint's stats need not match --dataset's; require only that it unnormalizes
         if not _np.isfinite(got).all() or _np.allclose(got, 0.0, atol=1e-6):
             raise RuntimeError(
                 f"post-processor is not unnormalizing: unnormalize(0) returned {got.round(4)}. "
@@ -256,11 +195,7 @@ def _assert_unnormalizes(postprocessor, stats_meta, cfg, args):
 def make_env(bddl_file, resolution):
     from libero.libero.envs import OffScreenRenderEnv
 
-    # LIBERO's default controller is robosuite OSC_POSE with control_delta=true and
-    # input range [-1, 1], which is exactly the convention of the dataset's 7-D action
-    # (deltas +-0.938 in xyz, small in rotation, gripper +-1) -- checked, not assumed, since
-    # an absolute-vs-delta mismatch would drive the arm to the workspace edge on step one.
-    # initialization_noise=None keeps resets deterministic given the saved initial state.
+    # default OSC_POSE delta controller matches the dataset's action convention
     env = OffScreenRenderEnv(
         bddl_file_name=bddl_file,
         camera_heights=resolution,
@@ -271,13 +206,7 @@ def make_env(bddl_file, resolution):
 
 
 def verify_obs(args, device):
-    """Compare env frames against real dataset frames under each candidate flip.
-
-    The camera is fixed and the background (table, robot base, walls) dominates the frame,
-    so the correct orientation wins by a wide margin even though the env's initial state and
-    the dataset episode's are not the same draw. A silent mismatch here would leave the
-    policy looking at upside-down images and score ~0% for a reason no metric would explain.
-    """
+    """Compare env frames against real dataset frames under each candidate flip."""
     from libero.libero import benchmark, get_libero_path
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -341,7 +270,7 @@ def rollout_batch(policy, preprocessor, postprocessor, envs, instructions, max_s
 
         for i, (env, _) in enumerate(envs):
             if done[i]:
-                continue  # finished episodes are frozen, not stepped: their actions are moot
+                continue  # finished episodes are frozen
             raw, _, term, _ = env.step(action[i])
             raws[i] = raw
             if env.check_success():
@@ -358,9 +287,6 @@ def main():
     p.add_argument("--adapter", type=Path, default=None, help="PEFT adapter dir; omit for a full checkpoint")
     p.add_argument("--policy", default="lerobot/pi0", help="base weights or a full fine-tuned dir")
     p.add_argument("--suite", default="libero_spatial")
-    # Normalization stats come from the *training* dataset even when rolling out another
-    # suite: at deployment the policy has no access to the target suite's statistics, and
-    # silently swapping them in would flatter an out-of-distribution result.
     p.add_argument("--dataset", default="lerobot/libero_spatial_image",
                    help="dataset supplying normalization stats (keep as the TRAINING set)")
     p.add_argument("--episodes-per-task", type=int, default=50, help="LIBERO convention: 50")
@@ -368,17 +294,15 @@ def main():
     p.add_argument("--envs-per-rank", type=int, default=8)
     p.add_argument("--resolution", type=int, default=256, help="must match the dataset (256)")
     p.add_argument("--n-action-steps", type=int, default=5,
-                   help="steps executed per predicted 50-chunk; openpi's LIBERO eval replans every 5")
+                   help="steps executed per 50-step chunk; openpi replans every 5")
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--image-transform", default="rot180", choices=list(IMAGE_TRANSFORMS))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-bf16", dest="bf16", action="store_false", default=True)
     p.add_argument("--from-pretrained-config", action="store_true",
-                   help="inherit the checkpoint's own config.json (cameras, empty_cameras, ...) "
-                        "instead of library defaults + --dataset; needed for third-party checkpoints")
+                   help="inherit the checkpoint's config.json; for third-party checkpoints")
     p.add_argument("--checkpoint-stats", action="store_true",
-                   help="use the normalization stats the checkpoint ships instead of --dataset's "
-                        "(required for third-party checkpoints trained on another mix)")
+                   help="use the checkpoint's own normalization stats; for third-party checkpoints")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--verify-obs", action="store_true")
     args = p.parse_args()
@@ -402,8 +326,7 @@ def main():
     transform = IMAGE_TRANSFORMS[args.image_transform]
 
     stats_meta = LeRobotDatasetMetadata(args.dataset)
-    # A prompt the policy never saw in training scores near zero for reasons no metric
-    # explains, so check the suite's wording against the training set's before rolling out.
+    # an unseen prompt scores near zero, so warn on instructions absent from training
     train_tasks = {str(t[0]) for t in stats_meta.episodes.to_pandas()["tasks"]}
     for tid in task_ids:
         lang = suite.get_task(tid).language
@@ -417,9 +340,7 @@ def main():
         else contextlib.nullcontext
     )
 
-    # Work unit is one episode = (task_id, trial). Dealt round-robin so ranks get an even
-    # mix of tasks rather than whole tasks, which would make a straggler rank's failures
-    # task-specific and skew a partial result.
+    # deal (task, trial) round-robin so each rank gets a mix of tasks
     jobs = [(tid, ep) for tid in task_ids for ep in range(args.episodes_per_task)]
     mine = jobs[R.rank :: R.world]
     if R.rank == 0:
@@ -427,8 +348,7 @@ def main():
               f"{args.envs_per_rank} env(s)/rank, n_action_steps={cfg.n_action_steps}, "
               f"max_steps={max_steps}, transform={args.image_transform}", flush=True)
 
-    # Group a rank's episodes by task so one batch shares a bddl file and one env can be
-    # reused across its trials — env construction dominates otherwise.
+    # group by task so envs are reused across trials
     by_task = defaultdict(list)
     for tid, ep in mine:
         by_task[tid].append(ep)
@@ -467,8 +387,6 @@ def main():
         for r in gathered:
             per_task[r["task_id"]].append(r["success"])
         overall = float(np.mean([r["success"] for r in gathered]))
-        # Binomial standard error: with 50 trials/task the per-task figure is worth about
-        # +-7 points, so per-task ordering should not be over-read.
         se = (overall * (1 - overall) / max(len(gathered), 1)) ** 0.5
         print("\n=== per-task success ===")
         for tid in sorted(per_task):

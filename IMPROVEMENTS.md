@@ -5,7 +5,7 @@ State as of 2026-08-30. We measure **54.2% ± 2.2** on LIBERO-spatial (LoRA `ada
 This file is about the ~42-point gap: what plausibly causes it, what each fix costs, and in
 what order to attempt them.
 
-Everything labelled *measured* comes from this repo's own runs (see `CLAUDE.md`). Everything
+Everything labelled *measured* comes from this repo's own runs (see `docs/notes.md`). Everything
 labelled *estimated* is arithmetic on those measurements. Expected gains are **guesses** unless
 stated otherwise — that is exactly why item 1 comes first.
 
@@ -17,8 +17,8 @@ stated otherwise — that is exactly why item 1 comes first.
   54.2% — a +2.4 point difference with SE 3.1 (z = 0.76), and the validation losses tie too
   (0.3350 vs 0.3344, inside ±0.002 seed noise). Parameter efficiency is not costing us 42
   points. Spending compute on "full fine-tune instead" is spending it on a measured null.
-- **It is not the evaluation harness being broken.** It was, once — see `CLAUDE.md`, "A good
-  validation loss does not mean the policy works" — and that is fixed and guarded. The
+- **It is not the evaluation harness being broken.** It was, once — see `docs/notes.md`, "LIBERO
+  evaluation" — and that is fixed and guarded. The
   protocol matches the standard convention (10 tasks × 50 trials from the suite's saved
   initial states, 280-step cap, which is *more* generous than OpenVLA's 220).
 - **It is not more GPUs.** Full FT OOMs under DDP even on 8× A100-40GB; only sharding makes it

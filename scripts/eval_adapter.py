@@ -1,23 +1,10 @@
 """Reload a saved checkpoint onto pi0 and re-measure validation loss.
 
-This is the check that the *published* artefact works, not just the in-memory model at
-the end of training: it loads the base weights fresh, applies the saved checkpoint, and
-evaluates on the same held-out episodes training used. If the number does not match the
-training log, the artefact is not what it claims to be.
+Loads the base weights fresh, applies the checkpoint, and evaluates on the training split's
+held-out episodes, so the result is comparable to the training log.
 
-Two shapes of artefact, one eval path, so the numbers are comparable:
-
-    # LoRA adapter from train_pi0.py
     python scripts/eval_adapter.py --adapter <run>/adapter_best --repeats 5
-    # full fine-tune exported by train_pi0_fsdp.py (a complete pi0 checkpoint)
     python scripts/eval_adapter.py --policy <run>/model_best --repeats 5
-
-Deliberately imports the training module rather than reimplementing the split and the
-eval loop — a divergent copy here would compare against the wrong episodes and quietly
-report a number nobody can reproduce.
-
-    srun -p plgrid-now -A <account> --gres=gpu:1 --cpus-per-task=16 --mem=100G \
-        -t 00:30:00 python scripts/eval_adapter.py --adapter <run>/adapter_best
 """
 
 import argparse
@@ -44,17 +31,13 @@ def main():
     p.add_argument("--dataset", default="lerobot/libero_spatial_image")
     p.add_argument("--policy", default="lerobot/pi0",
                    help="base weights, or a full fine-tuned checkpoint directory")
-    # Must match training, or the "validation" set is a different set of episodes.
-    p.add_argument("--val-episodes", type=int, default=40)
+    p.add_argument("--val-episodes", type=int, default=40, help="must match training")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--no-bf16", dest="bf16", action="store_false", default=True)
-    # pi0 is a flow-matching model: every forward samples a diffusion timestep and noise,
-    # so validation loss is a *stochastic* estimate, not a fixed number. Without seeding,
-    # repeated evaluation of the same weights gives different answers. Repeat and report
-    # spread, so epoch-to-epoch differences can be judged against the noise floor.
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--repeats", type=int, default=1)
+    p.add_argument("--repeats", type=int, default=1,
+                   help="repeat with seeds seed..seed+N-1 and report mean/std")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,7 +59,6 @@ def main():
         n_lora = sum(p_.numel() for n_, p_ in policy.named_parameters() if "lora" in n_.lower())
         print(f"adapter {args.adapter}: {n_lora/1e6:.2f}M LoRA params applied")
     else:
-        # A full fine-tune: the weights came from --policy, there is nothing to apply.
         print(f"policy {args.policy}: "
               f"{sum(p_.numel() for p_ in policy.parameters())/1e9:.2f}B params, no adapter")
 
@@ -102,12 +84,6 @@ def main():
 
     losses = []
     for i in range(args.repeats):
-        # The seed must go *through* evaluate(), not just be set before it: evaluate()
-        # re-seeds internally (it offsets per rank so ranks draw independent diffusion
-        # timesteps), and its default would otherwise overwrite the seed set here — every
-        # repeat would then evaluate identically and the reported std would be a
-        # structural zero rather than a measurement. Job 2991038 reported
-        # std=0.0000 spread=0.0000 over two seeds, which is what surfaced this.
         losses.append(
             T.evaluate(policy, loader, preprocessor, autocast_ctx, device, seed=args.seed + i)
         )

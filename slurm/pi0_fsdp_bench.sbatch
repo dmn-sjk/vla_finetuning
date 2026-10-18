@@ -7,16 +7,9 @@
 #SBATCH --mem=480G
 #SBATCH -t 02:00:00
 #SBATCH -o logs/%x-%j.out
-set -uo pipefail    # deliberately NOT -e: several rows are *expected* to OOM
+set -uo pipefail    # not -e: some rows are expected to OOM
 
-# The sharding experiment. Each row runs a few dozen optimizer steps of pi0 full
-# fine-tuning and prints one machine-greppable THROUGHPUT (or OOM_EXPECTED) line;
-# convergence is not the point, memory and throughput are.
-#
-# The question it answers: LoRA fits pi0 in 11.7 GiB on a 40 GB card, so what exactly
-# does sharding buy? Answer: it is the difference between "does not run at all" and
-# "runs", once the 4.03B parameters are all trainable and AdamW needs fp32 moments for
-# every one of them (~64 GiB before activations).
+# Sharding sweep: 30 steps per row, one THROUGHPUT or OOM_EXPECTED line each.
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
@@ -25,17 +18,12 @@ export MASTER_PORT=29503
 
 OUT=$VLA_RUNS/pi0_fsdp_bench
 rm -rf "$OUT"
-# --val-episodes 4 keeps the end-of-run validation pass short; --no-export and
-# --no-checkpoint skip writing multi-GiB files nobody will load. None of the three touch
-# the measured window, which covers training steps only.
+# short val pass and no multi-GiB writes; neither falls inside the timed window
 COMMON="--dataset lerobot/libero_spatial_image --num-workers 12 --val-episodes 4 \
         --max-steps 30 --epochs 1 --warmup-steps 5 --lr-warmup-steps 2 \
         --no-export --no-checkpoint --out $OUT"
 
-# Rows that need more GPUs than this allocation has are skipped rather than failing, so
-# the same script gives a partial sweep on a 4-GPU allocation when no full node is free —
-# which, on a partition where most nodes are drained, is the difference between numbers
-# today and numbers tomorrow. Submit with `sbatch --gres=gpu:4 ...` to override.
+# rows needing more GPUs than allocated are skipped, so `sbatch --gres=gpu:4` gives a partial sweep
 NGPU=${SLURM_GPUS_ON_NODE:-8}
 echo "allocation has $NGPU GPUs"
 
@@ -47,9 +35,7 @@ row () {  # row <label> <nproc> <args...>
   fi
   echo "=================== $label ==================="
   rm -rf "$OUT"
-  # Hard 20-minute cap per row: a rank that dies of OOM mid-collective can leave the
-  # others waiting out the 30-minute NCCL timeout, and one such row would eat the whole
-  # sweep's wall clock.
+  # 20 min cap per row: an OOM'd rank can leave the others waiting on the NCCL timeout
   timeout 1200 srun torchrun \
     --nnodes="$SLURM_NNODES" --nproc_per_node="$n" \
     --rdzv_backend=c10d --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
@@ -58,12 +44,10 @@ row () {  # row <label> <nproc> <args...>
 }
 
 # --- the baseline: no sharding -------------------------------------------------------
-# Expected to OOM. --oom-ok turns that into a reported line instead of a failed job;
-# it is only safe at world size 1, where no other rank is left waiting on a collective.
+# expected to OOM; --oom-ok reports it as a result line
 row "1 GPU  | DDP        | full FT" 1 $COMMON --finetune full --sharding ddp \
     --batch-size 8 --grad-checkpointing --oom-ok
-# DDP replicates optimizer state on every rank, so 8 GPUs does not help. No --oom-ok:
-# if it dies, torchrun tears the whole group down and the row is reported as FAILED.
+# expected to OOM too (DDP replicates optimizer state); no --oom-ok above world size 1
 row "8 GPUs | DDP        | full FT" 8 $COMMON --finetune full --sharding ddp \
     --batch-size 8 --grad-checkpointing
 
@@ -72,8 +56,7 @@ row "8 GPUs | SHARD_GRAD_OP | full FT" 8 $COMMON --finetune full --sharding shar
     --batch-size 8 --grad-checkpointing
 row "8 GPUs | FULL_SHARD    | full FT" 8 $COMMON --finetune full --sharding full_shard \
     --batch-size 8 --grad-checkpointing
-# No activation recomputation: isolates how much of the peak is activations rather than
-# states, which is what decides whether the batch size can go up.
+# without activation checkpointing, to size the activations
 row "8 GPUs | FULL_SHARD    | full FT | no grad ckpt" 8 $COMMON --finetune full \
     --sharding full_shard --batch-size 8
 
@@ -82,9 +65,7 @@ row "4 GPUs | SHARD_GRAD_OP | full FT" 4 $COMMON --finetune full --sharding shar
     --batch-size 8 --grad-checkpointing
 row "4 GPUs | FULL_SHARD    | full FT" 4 $COMMON --finetune full --sharding full_shard \
     --batch-size 8 --grad-checkpointing
-# Expected to fail, and that is the point: it locates the world-size floor. Measured in
-# job 2989671 at per-device batch 2 — the checkpoint resharded onto 2 ranks correctly, then
-# the first step OOM'd at 35.4 GiB allocated, 2.94 GiB short. Four GPUs is the minimum.
+# expected to OOM: locates the world-size floor
 row "2 GPUs | FULL_SHARD    | full FT (expect OOM)" 2 $COMMON --finetune full \
     --sharding full_shard --batch-size 8 --grad-checkpointing
 
@@ -93,8 +74,6 @@ row "8 GPUs | FULL_SHARD    | LoRA" 8 $COMMON --finetune lora --lora-target atte
     --sharding full_shard --batch-size 8 --grad-checkpointing
 
 echo "=================== summary ==================="
-# Own log, found by job id: $SLURM_JOB_NAME is not always what -J set it to, and a grep
-# that cannot open its file exits 2, which marks the whole job FAILED even when every row
-# behaved exactly as designed.
+# find the log by job id: $SLURM_JOB_NAME can differ from -J, and a failed grep fails the job
 grep -hE "^(THROUGHPUT|OOM_EXPECTED|ROW_FAILED|ROW_SKIPPED)" \
   "$SLURM_SUBMIT_DIR"/logs/*-"$SLURM_JOB_ID".out || echo "(no result lines found)"

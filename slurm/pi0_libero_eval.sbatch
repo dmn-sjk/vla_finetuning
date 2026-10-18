@@ -1,9 +1,7 @@
 #!/bin/bash
 #SBATCH -J pi0-libero-eval
 #SBATCH --nodes=1
-# Four GPUs, not eight: rollouts are inference-only (~10 GiB/rank), so the binding
-# constraint is scheduling latency, not memory, and 4-GPU jobs start while 8-GPU ones wait
-# for a whole free node. Ranks are independent -- no collective except the final gather.
+# 4 GPUs: inference only, and 4-GPU jobs schedule sooner
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=48
@@ -12,22 +10,14 @@
 #SBATCH -o logs/%x-%j.out
 set -uo pipefail
 
-# Closed-loop LIBERO-spatial success rates for every checkpoint worth reporting, under one
-# protocol so the three numbers are comparable to each other as well as to published
-# tables: 10 tasks x 50 trials from the suite's own saved initial states, 280-step cap.
-#
-# Base pi0 is included deliberately. Published pi0 LIBERO numbers come from a pi0 that was
-# fine-tuned on LIBERO; the released `lerobot/pi0` checkpoint was not, so its success rate
-# here is the honest zero-shot floor our fine-tuning has to beat, and quoting the paper's
-# number as "the baseline" would be wrong.
+# LIBERO-spatial success rates of base pi0, LoRA and full FT (10 tasks x 50 trials each).
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=29506
 
-# Finished checkpoints are read from where training left them; export CKPT_ROOT to
-# read an archived copy instead (see README -> Where things are configured).
+# export CKPT_ROOT to evaluate an archived copy
 CKPT_ROOT=${CKPT_ROOT:-$VLA_RUNS}
 NGPU=4
 NSTEPS=${NSTEPS:-5}
@@ -49,14 +39,7 @@ run () {  # name, extra args...
   echo "---- $name finished rc=$? in $((SECONDS - t0))s ----"
 }
 
-# Sanity gate before ~90 minutes of GPU time. The fine-tuned adapter should clear the floor
-# comfortably on two tasks; ~0% here means the observation/action pipeline is broken and
-# every number after it would be a confident zero. This is not hypothetical: the first
-# attempt at this evaluation scored 0/15 on a checkpoint that is demonstrably good, because
-# the post-processor was never given the dataset's stats and handed the simulator z-scores
-# (job 3108532). `_assert_unnormalizes` in eval_libero.py now catches that specific fault at
-# load time, but this gate is what catches the ones nobody has thought of yet -- it exercises
-# state, camera orientation, prompt and action scale together, which no assertion does.
+# sanity gate: ~0% here means the obs/action pipeline is broken
 echo "================ sanity: lora, 2 tasks x 4 trials ================"
 srun torchrun --nnodes=1 --nproc_per_node=$NGPU \
   --rdzv_backend=c10d --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \

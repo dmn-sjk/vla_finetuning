@@ -1,9 +1,6 @@
-"""Where this project's files live, resolved identically in Python and in shell.
+"""Project paths, resolved with the same defaults as slurm/common.sh.
 
-`slurm/common.sh` exports VLA_ROOT, VLA_RUNS and VLA_FFMPEG_PREFIX for every job,
-so a job and an interactive run write to the same places. The fallbacks below
-repeat that script's defaults, so an entrypoint launched with nothing exported
-still lands somewhere sensible instead of in the repository.
+Honours VLA_ROOT, VLA_RUNS and VLA_FFMPEG_PREFIX when exported.
 """
 
 import os
@@ -14,11 +11,7 @@ _REPO = Path(__file__).resolve().parent.parent
 
 
 def vla_root() -> Path:
-    """Work root: venv, caches and run outputs.
-
-    Defaults to `work/` inside the repository, matching common.sh, so a clone with
-    nothing exported stays self-contained. Export VLA_ROOT to move it elsewhere.
-    """
+    """Work root for venv, caches and run outputs; defaults to `work/` in the repo."""
     env = os.environ.get("VLA_ROOT")
     return Path(env) if env else _REPO / "work"
 

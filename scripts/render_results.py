@@ -1,9 +1,6 @@
-"""Render the LIBERO success-rate tables straight from the results JSON.
+"""Render the LIBERO success-rate tables for the model cards from results/*.json.
 
-Hand-copying three success rates and thirty per-task numbers into two model cards is a
-reliable way to publish a typo, so the cards get their tables from the measurement files.
-`--check` re-derives every rate from the raw per-episode records and fails if a stored
-summary disagrees, which catches a truncated or partially-gathered run.
+`--check` re-derives every rate from the per-episode records and fails on a mismatch.
 
     python scripts/render_results.py results/libero_spatial_*.json
 """

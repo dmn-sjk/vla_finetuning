@@ -9,28 +9,7 @@
 #SBATCH -o logs/%x-%j.out
 set -uo pipefail
 
-# IMPROVEMENTS.md item 1: whose gap is it?
-#
-# We measure 54.2% on LIBERO-spatial; openpi reports 96.8-97.4%. lerobot publishes its OWN
-# pi0 fine-tuned on LIBERO (lerobot/pi0_libero_finetuned_v044, trained on HuggingFaceVLA/libero
-# per its train_config.json). Running it through OUR harness splits the 42-point gap:
-#
-#   ~97%   -> harness sound, the gap is entirely our training recipe
-#   ~65-70%-> the gap is largely the lerobot pi0 port (matches lerobot issue #2114)
-#   ~54%   -> our recipe is already at the stack's ceiling
-#
-# Three flags matter, and each would silently cost points if omitted:
-#   --from-pretrained-config : inherit its real structure. It uses 3 image slots (image,
-#                              image2, + one empty padding camera) as openpi's LIBERO setup
-#                              does; our runs use 2. PI0Config(pretrained_path=...) would
-#                              quietly give 2 and library defaults.
-#   --checkpoint-stats       : use the stats it shipped, not spatial's. It was trained on the
-#                              combined 4-suite mix, so spatial's stats would misscale it.
-#   --dataset HuggingFaceVLA/libero : its training set, for the feature/task cross-checks.
-#                              Only meta files are fetched, not the 32.5 GiB of frames.
-#
-# READ-ONLY with respect to our own checkpoints: nothing here touches $CKPT_ROOT.
-# The reference weights download to $HF_HOME like any other Hub model.
+# lerobot's LIBERO-finetuned pi0 through our harness (own config and stats), to locate our gap.
 
 source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 

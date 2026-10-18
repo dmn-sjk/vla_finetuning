@@ -2,53 +2,26 @@
 name = "vla-finetuning"
 version = "0.1.0"
 description = "Distributed LoRA fine-tuning of a Vision-Language-Action model for robotic manipulation"
-# lerobot >=0.5 requires 3.12. Upper bound keeps resolution on interpreters with full
-# wheel coverage for this stack.
+# lerobot >=0.5 requires 3.12
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    # lerobot supplies both the pi0 policy and the LeRobotDataset loader.
-    #
-    # 0.6.x specifically. Two constraints pin this:
-    #   * lerobot fetches hub datasets by *git tag* matching its own CODEBASE_VERSION
-    #     rather than from main. 0.3.x is "v2.1" and the official LIBERO ports carry
-    #     only a "v3.0" tag, so LIBERO is silently unreachable from 0.3.x.
-    #   * 0.4.x's pi0 refuses to build against stock transformers — it imports
-    #     `transformers.models.siglip.check`, which exists only on the HF branch
-    #     `fix/lerobot_openpi`. That branch has since been rebased onto transformers 5.x,
-    #     which violates 0.4.x's own transformers<5 cap, so 0.4.x + pi0 is unsatisfiable.
-    #     0.5+ dropped the fork and runs pi0 on stock transformers.
-    #
-    # Extras: [pi] = pi0/pi05/pi0-fast deps, [peft] = LoRA, [training] = dataset stack +
-    # accelerate + wandb. Sim rollouts additionally want [libero] (adds hf-libero);
-    # left out until we actually run evaluations.
+    # 0.6.x: LIBERO ports need dataset v3.0; 0.4.x pi0 is unresolvable
     "lerobot[pi,peft,training]>=0.6.1,<0.7",
-    # Bounds below are lerobot 0.6.1's own, restated so the resolver picks the newest
-    # allowed version from the CUDA index rather than a stale one.
+    # lerobot 0.6.1's own bounds, restated so the CUDA index resolves the newest
     "torch>=2.11,<2.12",
-    # Must come from the same index as torch — a PyPI torchvision against an
-    # index torch fails at import with "operator torchvision::nms does not exist".
+    # must share torch's index (torchvision::nms)
     "torchvision>=0.26,<0.27",
-    # lerobot's video decoder. Needs FFmpeg shared libraries at runtime, which Athena
-    # does not provide — see README for the micromamba prefix that supplies them.
-    # Deliberately the PyPI (CPU) build, unlike torch: the cu128 build links NVIDIA NPP
-    # (libnppicc.so.12) for GPU decoding, which torch does not ship, so it fails to
-    # dlopen. lerobot only ever decodes on CPU, so the GPU build buys nothing.
+    # PyPI CPU build on purpose: the cu128 build needs NPP
     "torchcodec>=0.11,<0.12",
     "numpy>=2.0",
 ]
 
 [tool.uv]
-# Application, not a library: don't try to build/install the project itself.
+# application, not a library
 package = false
 
-# Pin CUDA wheels explicitly on Linux. Without this, `--torch-backend=auto`
-# resolves against the *login* node, which has no GPU driver, and silently
-# installs the CPU build. Non-Linux (e.g. a laptop) falls back to plain PyPI.
-#
-# cu128: lerobot 0.6.1 caps torch<2.12 and torchcodec<0.12, and cu128 carries
-# torch 2.11 / torchvision 0.26 — so both stay on one index and one CUDA major.
-# torchcodec is left on PyPI on purpose; see its dependency comment above.
-# A100 (sm_80) is fully supported on CUDA 12.8.
+# explicit cu128 wheels on Linux (auto-detection on a GPU-less login node picks CPU builds);
+# cu128 carries torch 2.11, the newest lerobot 0.6.1 allows
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"

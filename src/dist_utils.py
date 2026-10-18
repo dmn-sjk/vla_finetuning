@@ -1,8 +1,4 @@
-"""Distributed helpers shared by the training entrypoints.
-
-Everything here is a no-op when the script is launched without torchrun, so the
-same entrypoint runs on a laptop, on one A100, or on 8 via torchrun.
-"""
+"""Distributed helpers; all are no-ops when launched without torchrun."""
 
 import os
 from datetime import timedelta
@@ -28,11 +24,7 @@ def is_distributed() -> bool:
 
 
 def is_main_process() -> bool:
-    """Gate for W&B, checkpoint writes, dataset downloads, progress bars.
-
-    Concurrent writes from 8 ranks to shared Lustre corrupt files, so anything
-    touching disk or an external service goes behind this.
-    """
+    """Gate for W&B, checkpoint writes, downloads and progress output."""
     return rank() == 0
 
 
@@ -45,10 +37,7 @@ def setup() -> torch.device:
         device = torch.device("cpu")
 
     if is_distributed():
-        # Long timeout: the first NCCL collective on a cold cluster can be slow,
-        # and a too-short timeout looks identical to a real hang.
-        # device_id pins collectives to this rank's GPU; without it barrier()
-        # infers a device from ambient context and can pick the wrong one.
+        # device_id pins collectives to this GPU
         dist.init_process_group(
             backend="nccl" if torch.cuda.is_available() else "gloo",
             timeout=timedelta(minutes=30),
@@ -58,7 +47,7 @@ def setup() -> torch.device:
 
 
 def cleanup() -> None:
-    """Barrier then tear down. Skipping this leaves jobs hanging at exit."""
+    """Barrier then tear down, so jobs do not hang at exit."""
     if is_distributed() and dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
