@@ -13,8 +13,8 @@ in the README; this file only explains why.
   modules). Coverage is ~61% of parameters (`fsdp_wrapped=` on startup); the rest sits in the
   root unit. `train_pi0_fsdp.py` raises below 50% so a transformers class rename cannot
   collapse FULL_SHARD into SHARD_GRAD_OP unnoticed.
-- DeepSpeed ZeRO-3 fails for the same reason (hook-based gathering). FSDP SHARD_GRAD_OP is
-  ZeRO-2 without the extra dependency.
+- DeepSpeed ZeRO-3 hooks every submodule down to each `nn.Linear`, so it is expected to work
+  on pi0, but is untested. FSDP SHARD_GRAD_OP is ZeRO-2 without the extra dependency.
 - accelerate ignores the FSDP plugin at world size 1 (the branch sits inside the MULTI_GPU
   arm), so a single-process `--sharding full_shard` would train unsharded. The script refuses it.
 - The model is built in fp32: FSDP1 flattens each unit into one tensor and cannot mix dtypes,
