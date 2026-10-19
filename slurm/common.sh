@@ -1,4 +1,4 @@
-# Shared prologue for every slurm/*.sbatch and for interactive use. Source it, do not run it:
+# Shared preamble for every slurm/*.sbatch and for interactive use. Source it, do not run it:
 #   source "${SLURM_SUBMIT_DIR:-.}/slurm/common.sh"
 # Each variable below is only defaulted, so an exported value wins:
 #   VLA_ROOT (./work), VLA_RUNS ($VLA_ROOT/runs), VLA_FFMPEG_PREFIX ($VLA_ROOT/ffmpeg),

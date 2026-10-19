@@ -171,6 +171,8 @@ def make_env(bddl_file, resolution):
 def verify_obs(args, device):
     """Compare env frames against real dataset frames under each candidate flip."""
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    # deferred: importing libero may prompt via input() and initialises EGL
     from libero.libero import benchmark, get_libero_path
 
     suite = benchmark.get_benchmark_dict()[args.suite]()
@@ -304,6 +306,7 @@ def main():
     rank, world = D.rank(), D.world_size()
     torch.manual_seed(args.seed + 1000 * rank)
 
+    # deferred: importing libero may prompt via input() and initialises EGL
     from libero.libero import benchmark, get_libero_path
 
     suite = benchmark.get_benchmark_dict()[args.suite]()

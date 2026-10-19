@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # Publish the LIBERO checkpoints to the Hugging Face Hub. Dry run unless --go.
-# The 7.6 GB full checkpoint takes a while; run it inside tmux on a login node.
-# Visibility applies only when a repo is created; --public will not flip an existing one.
 set -euo pipefail
 
 usage() { echo "usage: scripts/publish.sh [--go] [--public] [lora|full|all]..."; }
