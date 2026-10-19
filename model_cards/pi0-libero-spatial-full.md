@@ -16,16 +16,16 @@ datasets:
 
 # pi0-libero-spatial-full
 
-**All 4.03B parameters** of [`lerobot/pi0`](https://huggingface.co/lerobot/pi0) fine-tuned on the **LIBERO-Spatial** suite, sharded with PyTorch FSDP (ZeRO-3).
+**All 3.3B parameters** of [`lerobot/pi0`](https://huggingface.co/lerobot/pi0) fine-tuned on the **LIBERO-Spatial** suite, sharded with PyTorch FSDP (ZeRO-3).
 
-> This checkpoint is published as the control arm of a full-fine-tuning vs. LoRA comparison, not because it is the better policy. It is tied with a [49 MB LoRA adapter](https://huggingface.co/dmnsjk/pi0-libero-spatial-lora) that trains on a quarter of the hardware, and it is 160x larger. If you just want a LIBERO-Spatial pi0, use the adapter. What this checkpoint is useful for is studying what full fine-tuning does to a 4B VLA on a small suite: what it does is overfit, within a single epoch.
+> This checkpoint is published as the control arm of a full-fine-tuning vs. LoRA comparison, not because it is the better policy. It is tied with a [49 MB LoRA adapter](https://huggingface.co/dmnsjk/pi0-libero-spatial-lora) that trains on a quarter of the hardware, and it is 160x larger. If you just want a LIBERO-Spatial pi0, use the adapter. What this checkpoint is useful for is studying what full fine-tuning does to a 3.3B VLA on a small suite: what it does is overfit, within a single epoch.
 
 ## Model details
 
 | | |
 | --- | --- |
 | Base model | `lerobot/pi0` (PaliGemma-3B backbone + flow-matching action expert) |
-| Method | Full fine-tuning, all 4,028M parameters trainable |
+| Method | Full fine-tuning, all 3.3B parameters trainable (lerobot's port counts 4,028M: it also holds ~0.79B of vocabulary-sized LM heads that π0 never uses) |
 | Dataset | [`lerobot/libero_spatial_image`](https://huggingface.co/datasets/lerobot/libero_spatial_image), 432 episodes / 52,970 frames, 10 tasks |
 | Split | 392 train / 40 validation, held out **by episode** |
 | Artefact | 7.6 GB (`model.safetensors` + processor configs) |
@@ -86,13 +86,13 @@ Flow-matching loss on the 40 held-out episodes, re-measured by reloading each ar
 | --- | --- | --- | --- | --- |
 | base `lerobot/pi0` (zero-shot) | 0.8719 ± 0.0048 | — | — | — |
 | [LoRA `adapter_best`](https://huggingface.co/dmnsjk/pi0-libero-spatial-lora) | 0.3344 ± 0.0020 | 12.65M | 49 MB | 1 |
-| **full fine-tune `model_best` (this model)** | **0.3350 ± 0.0014** | 4,028M | 7.6 GB | 4 |
+| **full fine-tune `model_best` (this model)** | **0.3350 ± 0.0014** | 3.3B | 7.6 GB | 4 |
 
 ± is the standard deviation of the 3 passes (dividing by n): the spread of the stochastic estimate for one checkpoint, not variance across training runs.
 
 ### LoRA matches full fine-tuning, on both metrics
 
-Full FT minus LoRA is **+2.4 points of success rate, with a standard error of 3.1 points (z = 0.76, two-sided p = 0.45)** — not significant. The standard error of the gap is √(SE_LoRA² + SE_full²) = √(2.2² + 2.2²), i.e. an unpooled two-proportion z-test. That test treats the two runs as independent. Both actually started from the same 500 initial states; a paired McNemar test on the per-episode outcomes (87 episodes only LoRA solved, 99 only full FT solved) gives z = 0.88, so the verdict is the same. The validation-loss gap is 0.0006, inside the ±0.002 spread between seeded passes. A LoRA training 0.31% of the parameters reaches the same quality as fine-tuning all 4.03B, with a 160x smaller artefact and a quarter of the hardware.
+Full FT minus LoRA is **+2.4 points of success rate, with a standard error of 3.1 points (z = 0.76, two-sided p = 0.45)** — not significant. The standard error of the gap is √(SE_LoRA² + SE_full²) = √(2.2² + 2.2²), i.e. an unpooled two-proportion z-test. That test treats the two runs as independent. Both actually started from the same 500 initial states; a paired McNemar test on the per-episode outcomes (87 episodes only LoRA solved, 99 only full FT solved) gives z = 0.88, so the verdict is the same. The validation-loss gap is 0.0006, inside the ±0.002 spread between seeded passes. A LoRA training 0.38% of the parameters reaches the same quality as fine-tuning all 3.3B, with a 160x smaller artefact and a quarter of the hardware.
 
 This compares one training run per arm. Training-seed variance was not measured, so the result shows these two checkpoints tie. It is suggestive, not proof, that the two methods do.
 
@@ -118,7 +118,7 @@ Validation loss over the 5 epochs, against a falling training loss:
 | 3 | 0.6869 | |
 | 4 | 0.8361 | 0.084 |
 
-By epoch 4 the model fits the training set almost perfectly (train loss 0.084) and its validation loss has returned to roughly that of the untrained base model (0.8719 +- 0.0048) — the entire fine-tuning gain given back. 392 episodes is not enough data to move 4B parameters for more than about one epoch. Only the epoch-0 checkpoint is published.
+By epoch 4 the model fits the training set almost perfectly (train loss 0.084) and its validation loss has returned to roughly that of the untrained base model (0.8719 +- 0.0048) — the entire fine-tuning gain given back. 392 episodes is not enough data to move 3.3B parameters for more than about one epoch. Only the epoch-0 checkpoint is published.
 
 ## Usage
 

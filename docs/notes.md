@@ -11,7 +11,7 @@ Non-obvious facts about pi0 and LIBERO.
 - The model is built in fp32: FSDP1 flattens each unit into one tensor and cannot mix dtypes, and pi0's own bf16 mode keeps the vision tower and norms in fp32. bf16 compute comes from an FSDP `MixedPrecision` policy (fp32 master weights and gradient reduction).
 - No `no_sync()` on accumulation micro-batches under FSDP: it keeps unsharded gradients resident for the whole window.
 - The LR scheduler is not passed through `accelerate.prepare`: `AcceleratedScheduler` steps once per process, multiplying the schedule by world size. It is stepped by hand.
-- `save_state` serialises the full 4.03B model even for LoRA (~16 GB per epoch). It is a resume point, not an artefact; `--no-checkpoint` skips it.
+- `save_state` serialises the full model (4.03B resident parameters, see Results) even for LoRA (~16 GB per epoch). It is a resume point, not an artefact; `--no-checkpoint` skips it.
 - The exported directory must include both processor configs: they carry the normalization statistics, without which the weights load and predict nonsense.
 
 ## pi0 + LoRA under DDP
@@ -49,7 +49,7 @@ Non-obvious facts about pi0 and LIBERO.
 
 ## Results (LIBERO-spatial)
 
-LoRA: `--lora-target attention`, r=32, 12.65M trainable. Full FT: 4.028B trainable, FULL_SHARD.
+LoRA: `--lora-target attention`, r=32, 12.65M trainable. Full FT: all 3.3B trainable, FULL_SHARD. π0 is 3.3B parameters as published. lerobot's port holds 4.03B because it also keeps two vocabulary-sized LM heads (~0.79B) that π0 never uses. Memory figures count the 4.03B actually resident.
 
 | checkpoint | val loss (n=3) | success (500 eps) | artefact | min GPUs |
 | --- | --- | --- | --- | --- |
@@ -81,4 +81,4 @@ Full FT memory, per-device batch 8, gradient checkpointing, `--reduce-dtype fp32
 | 8 | FULL_SHARD, no grad ckpt | 31.0 | 33.2 GiB |
 | 8 | FULL_SHARD, LoRA | 50.9 | 11.7 GiB |
 
-ZeRO-2 peak at world size N: 16.1/N fp32 master + 8.1 bf16 params + 16.1/N grads + 32.2/N AdamW + ~1 activations, matching both rows. ZeRO-3 gives no extra saving because 39% of the model sits in the always-gathered root unit.
+ZeRO-2 peak at world size N: 16.1/N fp32 master (4.03B x 4 bytes) + 8.1 bf16 params + 16.1/N grads + 32.2/N AdamW + ~1 activations, matching both rows. ZeRO-3 gives no extra saving because 39% of the model sits in the always-gathered root unit.

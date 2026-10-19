@@ -16,16 +16,16 @@ datasets:
 
 # pi0-libero-spatial-lora
 
-A LoRA adapter that fine-tunes [`lerobot/pi0`](https://huggingface.co/lerobot/pi0) on the **LIBERO-Spatial** manipulation suite. 12.65M trainable parameters (0.31% of the 4.03B base), a 49 MB artefact, trained in 67 minutes on 8x A100-40GB with plain DDP.
+A LoRA adapter that fine-tunes [`lerobot/pi0`](https://huggingface.co/lerobot/pi0) on the **LIBERO-Spatial** manipulation suite. 12.65M trainable parameters (0.38% of the 3.3B base), a 49 MB artefact, trained in 67 minutes on 8x A100-40GB with plain DDP.
 
 ## Model details
 
 | | |
 | --- | --- |
-| Base model | `lerobot/pi0` (PaliGemma-3B backbone + flow-matching action expert, 4.03B params) |
+| Base model | `lerobot/pi0` (PaliGemma-3B backbone + flow-matching action expert, 3.3B params) |
 | Method | LoRA (PEFT), r=32, alpha=64, dropout=0.05 |
 | Adapted modules | q/k/v/o projections of **both** towers (VLM backbone and action expert), plus the state/action projections `state_proj`, `action_in_proj`, `action_out_proj`, `action_time_mlp_in`, `action_time_mlp_out` |
-| Trainable params | 12,648,448 (0.31%) |
+| Trainable params | 12,648,448 (0.38%) |
 | Dataset | [`lerobot/libero_spatial_image`](https://huggingface.co/datasets/lerobot/libero_spatial_image), 432 episodes / 52,970 frames, 10 tasks |
 | Split | 392 train / 40 validation, held out **by episode** (a frame-level split leaks: consecutive frames of a trajectory are near-duplicates) |
 | Action space | 7-D end-effector delta + gripper, 50-step chunk at 10 Hz |
@@ -86,13 +86,13 @@ Flow-matching loss on the 40 held-out episodes, re-measured by reloading each ar
 | --- | --- | --- | --- | --- |
 | base `lerobot/pi0` (zero-shot) | 0.8719 ± 0.0048 | — | — | — |
 | **LoRA `adapter_best` (this model)** | **0.3344 ± 0.0020** | 12.65M | 49 MB | 1 |
-| [full fine-tune `model_best`](https://huggingface.co/dmnsjk/pi0-libero-spatial-full) | 0.3350 ± 0.0014 | 4,028M | 7.6 GB | 4 |
+| [full fine-tune `model_best`](https://huggingface.co/dmnsjk/pi0-libero-spatial-full) | 0.3350 ± 0.0014 | 3.3B | 7.6 GB | 4 |
 
 ± is the standard deviation of the 3 passes (dividing by n): the spread of the stochastic estimate for one checkpoint, not variance across training runs.
 
 ### LoRA matches full fine-tuning, on both metrics
 
-Full FT minus LoRA is **+2.4 points of success rate, with a standard error of 3.1 points (z = 0.76, two-sided p = 0.45)** — not significant. The standard error of the gap is √(SE_LoRA² + SE_full²) = √(2.2² + 2.2²), i.e. an unpooled two-proportion z-test. That test treats the two runs as independent. Both actually started from the same 500 initial states; a paired McNemar test on the per-episode outcomes (87 episodes only LoRA solved, 99 only full FT solved) gives z = 0.88, so the verdict is the same. The validation-loss gap is 0.0006, inside the ±0.002 spread between seeded passes. A LoRA training 0.31% of the parameters reaches the same quality as fine-tuning all 4.03B, with a 160x smaller artefact and a quarter of the hardware.
+Full FT minus LoRA is **+2.4 points of success rate, with a standard error of 3.1 points (z = 0.76, two-sided p = 0.45)** — not significant. The standard error of the gap is √(SE_LoRA² + SE_full²) = √(2.2² + 2.2²), i.e. an unpooled two-proportion z-test. That test treats the two runs as independent. Both actually started from the same 500 initial states; a paired McNemar test on the per-episode outcomes (87 episodes only LoRA solved, 99 only full FT solved) gives z = 0.88, so the verdict is the same. The validation-loss gap is 0.0006, inside the ±0.002 spread between seeded passes. A LoRA training 0.38% of the parameters reaches the same quality as fine-tuning all 3.3B, with a 160x smaller artefact and a quarter of the hardware.
 
 This compares one training run per arm. Training-seed variance was not measured, so the result shows these two checkpoints tie. It is suggestive, not proof, that the two methods do.
 

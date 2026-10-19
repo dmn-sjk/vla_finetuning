@@ -13,9 +13,9 @@ LIBERO-spatial, 40 held-out episodes for val loss (3 seeds), 500 closed-loop epi
 | --- | --- | --- | --- | --- | --- |
 | base `lerobot/pi0` | - | 0.8719 ± 0.0048 | 0.0% | - | - |
 | LoRA `adapter_best` | 12.65M | 0.3344 ± 0.0020 | 54.2% ± 2.2 | 49 MB | 1 |
-| full FT `model_best` | 4,028M | 0.3350 ± 0.0014 | 56.6% ± 2.2 | 7.6 GB | 4 |
+| full FT `model_best` | 3.3B | 0.3350 ± 0.0014 | 56.6% ± 2.2 | 7.6 GB | 4 |
 
-LoRA and full FT tie on both metrics. Full FT does not fit on one A100-40GB, nor on 8 under DDP; it needs FSDP across at least 4 GPUs. Memory and scaling tables, and the reasons behind the non-obvious choices, are in [docs/notes.md](docs/notes.md).
+LoRA and full FT tie on both metrics. Full FT does not fit on one A100-40GB, nor on 8 under DDP; it needs FSDP across at least 4 GPUs. π0 is 3.3B parameters as published. lerobot's port holds 4.03B because it also keeps two vocabulary-sized LM heads (~0.79B) that π0 never uses.
 
 ## Setup
 
